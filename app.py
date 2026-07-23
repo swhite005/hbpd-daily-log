@@ -44,7 +44,15 @@ def thousand_block(address):
 def parse_incidents(raw_text):
     incidents = []
 
-    # Extract any update text that appears BEFORE the first DR# and associates
+    # Normalize Windows-1252 / C1 control dash characters that Outlook
+    # pastes instead of proper Unicode dashes — Python's split() treats
+    # these as whitespace and silently drops them
+    raw_text = (raw_text
+        .replace('\x96', '\u2013')   # en-dash
+        .replace('\x97', '\u2014')   # em-dash
+        .replace('\u0096', '\u2013') # C1 en-dash
+        .replace('\u0097', '\u2014') # C1 em-dash
+    )
     # it with a DR# mentioned in that same paragraph block
     pre_dr_text = ''
     first_dr_pos = re.search(r'DR#\s*:', raw_text, re.IGNORECASE)
