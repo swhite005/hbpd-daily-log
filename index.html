@@ -345,7 +345,7 @@
 // ─── CONFIGURATION ───────────────────────────────────────────────
 // After deploying your backend to Render, replace this URL with your
 // actual Render service URL (e.g. https://hbpd-daily-log-api.onrender.com)
-const BACKEND_URL = "https://hbpd-daily-log.onrender.com";
+const BACKEND_URL = "https://YOUR-RENDER-SERVICE.onrender.com";
 // ─────────────────────────────────────────────────────────────────
 
 const isConfigured = !BACKEND_URL.includes("YOUR-RENDER");
@@ -450,10 +450,16 @@ async function generate() {
       return;
     }
 
-    // Get filename from Content-Disposition header
+    // Get filename — try X-Filename, then Content-Disposition, then build from today's date
+    const xFilename = res.headers.get('X-Filename');
     const disposition = res.headers.get('Content-Disposition') || '';
     const nameMatch = disposition.match(/filename="?([^"]+)"?/);
-    const filename = nameMatch ? nameMatch[1] : 'daily-log.docx';
+    const today = new Date();
+    const mm = String(today.getMonth() + 1).padStart(2, '0');
+    const dd = String(today.getDate()).padStart(2, '0');
+    const yyyy = today.getFullYear();
+    const dateFilename = `${mm}-${dd}-${yyyy}.docx`;
+    const filename = xFilename || (nameMatch ? nameMatch[1] : dateFilename);
 
     // Download the file
     const blob = await res.blob();
