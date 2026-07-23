@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HBPD Daily Activity Log Generator</title>
+<style>
+  :root {
+    --navy: #1a2744;
+    --gold: #c8a84b;
+    --light-gold: #f0e6c8;
+    --bg: #f4f6f9;
+    --white: #ffffff;
+    --border: #d0d7e2;
+    --text: #1e2a3a;
+    --muted: #6b7a8d;
+    --success: #2e7d32;
+    --error: #c62828;
+    --shadow: 0 2px 12px rgba(26,39,68,0.10);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+
+  header {
+    background: var(--navy);
+    padding: 0 32px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    height: 72px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+  }
+
+  .badge {
+    width: 48px;
+    height: 48px;
+    background: var(--gold);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    flex-shrink: 0;
+  }
+
+  header h1 {
+    color: var(--white);
+    font-size: 18px;
+    font-weight: 600;
+    line-height: 1.2;
+  }
+
+  header h1 span {
+    color: var(--gold);
+    display: block;
+    font-size: 13px;
+    font-weight: 400;
+    margin-top: 2px;
+  }
+
+  main {
+    max-width: 860px;
+    margin: 36px auto;
+    padding: 0 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+
+  .card {
+    background: var(--white);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    padding: 28px 32px;
+  }
+
+  .card h2 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--navy);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 18px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid var(--light-gold);
+  }
+
+  label {
+    display: block;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+
+  select {
+    width: 100%;
+    padding: 10px 14px;
+    border: 1.5px solid var(--border);
+    border-radius: 6px;
+    font-size: 15px;
+    color: var(--text);
+    background: var(--white);
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%236b7a8d' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 14px center;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+
+  select:focus { outline: none; border-color: var(--navy); }
+
+  .drop-zone {
+    border: 2px dashed var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    text-align: center;
+    transition: all 0.2s;
+    margin-bottom: 14px;
+    cursor: pointer;
+  }
+
+  .drop-zone.drag-over {
+    border-color: var(--gold);
+    background: var(--light-gold);
+  }
+
+  .drop-zone p {
+    color: var(--muted);
+    font-size: 13px;
+    pointer-events: none;
+  }
+
+  .drop-zone strong {
+    color: var(--navy);
+    font-size: 14px;
+    display: block;
+    margin-bottom: 4px;
+  }
+
+  textarea {
+    width: 100%;
+    min-height: 320px;
+    padding: 14px;
+    border: 1.5px solid var(--border);
+    border-radius: 6px;
+    font-size: 13px;
+    font-family: 'SF Mono', 'Consolas', monospace;
+    color: var(--text);
+    line-height: 1.6;
+    resize: vertical;
+    transition: border-color 0.15s;
+  }
+
+  textarea:focus { outline: none; border-color: var(--navy); }
+
+  textarea::placeholder { color: var(--border); }
+
+  .char-count {
+    text-align: right;
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 6px;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 28px;
+    border: none;
+    border-radius: 6px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .btn-primary {
+    background: var(--navy);
+    color: var(--white);
+    width: 100%;
+    justify-content: center;
+  }
+
+  .btn-primary:hover:not(:disabled) { background: #243560; }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .btn-clear {
+    background: none;
+    color: var(--muted);
+    font-size: 13px;
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    margin-top: 10px;
+  }
+
+  .btn-clear:hover { background: var(--bg); }
+
+  .actions {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .status {
+    border-radius: 6px;
+    padding: 12px 16px;
+    font-size: 14px;
+    display: none;
+  }
+
+  .status.show { display: block; }
+  .status.loading { background: #e3f0fb; color: #1565c0; }
+  .status.success { background: #e8f5e9; color: var(--success); }
+  .status.error   { background: #ffebee; color: var(--error); }
+
+  .spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    vertical-align: middle;
+    margin-right: 6px;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .preview {
+    display: none;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .preview.show { display: flex; }
+
+  .incident-card {
+    background: var(--bg);
+    border-left: 3px solid var(--gold);
+    border-radius: 4px;
+    padding: 10px 14px;
+    font-size: 13px;
+  }
+
+  .incident-card .inc-header {
+    font-weight: 600;
+    color: var(--navy);
+    margin-bottom: 4px;
+  }
+
+  .incident-card .inc-meta {
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .config-notice {
+    background: var(--light-gold);
+    border: 1px solid var(--gold);
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 13px;
+    color: #7a5c00;
+    display: none;
+  }
+
+  footer {
+    text-align: center;
+    padding: 24px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="badge">⭐</div>
+  <h1>
+    Daily Activity Log Generator
+    <span>Huntington Beach Police Department</span>
+  </h1>
+</header>
+
+<main>
+
+  <!-- Config notice for first-time setup -->
+  <div class="config-notice" id="configNotice">
+    ⚠️ <strong>Setup required:</strong> Update <code>BACKEND_URL</code> in this file with your Render API URL before use.
+  </div>
+
+  <!-- Supervisor Selection -->
+  <div class="card">
+    <h2>Prepared By</h2>
+    <label for="supervisorSelect">Supervisor</label>
+    <select id="supervisorSelect">
+      <option value="">Loading…</option>
+    </select>
+  </div>
+
+  <!-- Incident Text Input -->
+  <div class="card">
+    <h2>Incident Data</h2>
+
+    <div class="drop-zone" id="dropZone">
+      <strong>Drag &amp; drop a .txt file here</strong>
+      <p>or paste your incident report data below</p>
+    </div>
+
+    <label for="incidentText">Paste incident data</label>
+    <textarea
+      id="incidentText"
+      placeholder="DR#:&#10;26-000000&#10;Time:&#10;8:00 AM&#10;Location:&#10;Beach Blvd @ Walmart&#10;Subject:&#10;Warrant Arrest&#10;Details:&#10;Officers contacted a subject…&#10;&#10;DR#:&#10;26-000001&#10;…"
+    ></textarea>
+    <div class="char-count"><span id="charCount">0</span> characters</div>
+    <button class="btn btn-clear" onclick="clearText()">Clear</button>
+  </div>
+
+  <!-- Actions -->
+  <div class="card actions">
+    <h2>Generate</h2>
+    <div class="status" id="statusBox"></div>
+    <div class="preview" id="previewBox"></div>
+    <button class="btn btn-primary" id="generateBtn" onclick="generate()">
+      📄 Generate Daily Log
+    </button>
+  </div>
+
+</main>
+
+<footer>HBPD Internal Use Only &nbsp;·&nbsp; Daily Activity Log Generator</footer>
+
+<script>
+// ─── CONFIGURATION ───────────────────────────────────────────────
+// After deploying your backend to Render, replace this URL with your
+// actual Render service URL (e.g. https://hbpd-daily-log-api.onrender.com)
+const BACKEND_URL = "https://YOUR-RENDER-SERVICE.onrender.com";
+// ─────────────────────────────────────────────────────────────────
+
+const isConfigured = !BACKEND_URL.includes("YOUR-RENDER");
+
+document.addEventListener('DOMContentLoaded', () => {
+  if (!isConfigured) {
+    document.getElementById('configNotice').style.display = 'block';
+    document.getElementById('generateBtn').disabled = true;
+  } else {
+    loadSupervisors();
+  }
+
+  const textarea = document.getElementById('incidentText');
+  textarea.addEventListener('input', updateCharCount);
+
+  // Drag and drop
+  const dropZone = document.getElementById('dropZone');
+  dropZone.addEventListener('dragover', e => {
+    e.preventDefault();
+    dropZone.classList.add('drag-over');
+  });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (file && file.type === 'text/plain') {
+      const reader = new FileReader();
+      reader.onload = ev => {
+        textarea.value = ev.target.result;
+        updateCharCount();
+      };
+      reader.readAsText(file);
+    } else {
+      showStatus('error', 'Please drop a .txt file.');
+    }
+  });
+  dropZone.addEventListener('click', () => textarea.focus());
+});
+
+async function loadSupervisors() {
+  try {
+    const res = await fetch(`${BACKEND_URL}/supervisors`);
+    const names = await res.json();
+    const sel = document.getElementById('supervisorSelect');
+    sel.innerHTML = names.map(n => `<option value="${n}">${n}</option>`).join('');
+  } catch {
+    document.getElementById('supervisorSelect').innerHTML =
+      '<option value="Lieutenant Shawn White">Lieutenant Shawn White</option>';
+  }
+}
+
+function updateCharCount() {
+  const len = document.getElementById('incidentText').value.length;
+  document.getElementById('charCount').textContent = len.toLocaleString();
+}
+
+function clearText() {
+  document.getElementById('incidentText').value = '';
+  updateCharCount();
+  hideStatus();
+  document.getElementById('previewBox').classList.remove('show');
+  document.getElementById('previewBox').innerHTML = '';
+}
+
+function showStatus(type, message) {
+  const box = document.getElementById('statusBox');
+  box.className = `status show ${type}`;
+  box.innerHTML = type === 'loading'
+    ? `<span class="spinner"></span> ${message}`
+    : message;
+}
+
+function hideStatus() {
+  document.getElementById('statusBox').className = 'status';
+}
+
+async function generate() {
+  const preparedBy = document.getElementById('supervisorSelect').value;
+  const text = document.getElementById('incidentText').value.trim();
+  const btn = document.getElementById('generateBtn');
+
+  if (!text) {
+    showStatus('error', 'Please paste incident data before generating.');
+    return;
+  }
+
+  btn.disabled = true;
+  showStatus('loading', 'Parsing incidents and generating document…');
+  document.getElementById('previewBox').classList.remove('show');
+
+  try {
+    const res = await fetch(`${BACKEND_URL}/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ preparedBy, text })
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      showStatus('error', `❌ ${err.error || 'Server error. Please try again.'}`);
+      return;
+    }
+
+    // Get filename from Content-Disposition header
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const nameMatch = disposition.match(/filename="?([^"]+)"?/);
+    const filename = nameMatch ? nameMatch[1] : 'daily-log.docx';
+
+    // Download the file
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    // Show preview of parsed incidents
+    await showPreview(text);
+    showStatus('success', `✅ <strong>${filename}</strong> downloaded successfully.`);
+
+  } catch (err) {
+    showStatus('error', `❌ Could not reach the server. Check your connection or backend URL.`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function showPreview(text) {
+  // Quick client-side parse just for the preview cards
+  const chunks = text.split(/(?=DR#\s*[:：])/i).filter(c => c.trim());
+  const previewBox = document.getElementById('previewBox');
+  previewBox.innerHTML = `<div style="font-size:13px;font-weight:600;color:var(--navy);margin-bottom:4px">${chunks.length} incident(s) parsed</div>`;
+
+  chunks.forEach((chunk, i) => {
+    const dr = (chunk.match(/DR#\s*[:：]\s*(.+?)(?:\n|$)/i) || [])[1] || 'N/A';
+    const subj = (chunk.match(/Subject\s*[:：]\s*(.+?)(?:\n|$)/i) || [])[1] || 'N/A';
+    const loc = (chunk.match(/Location\s*[:：]\s*(.+?)(?:\n|$)/i) || [])[1] || 'N/A';
+    const time = (chunk.match(/Time\s*[:：]\s*(.+?)(?:\n|$)/i) || [])[1] || 'N/A';
+
+    previewBox.innerHTML += `
+      <div class="incident-card">
+        <div class="inc-header">${i + 1}. ${subj.trim()}</div>
+        <div class="inc-meta">DR# ${dr.trim()} &nbsp;·&nbsp; ${time.trim()} &nbsp;·&nbsp; ${loc.trim()}</div>
+      </div>`;
+  });
+
+  previewBox.classList.add('show');
+}
+</script>
+</body>
+</html>
