@@ -314,7 +314,7 @@
     <h2>Incident Data</h2>
 
     <div class="drop-zone" id="dropZone">
-      <strong>Drag &amp; drop a .txt file here</strong>
+      <strong>Drag &amp; drop a .eml or .txt file here</strong>
       <p>or paste your incident report data below</p>
     </div>
 
@@ -372,29 +372,94 @@ document.addEventListener('DOMContentLoaded', () => {
     e.preventDefault();
     dropZone.classList.remove('drag-over');
     const file = e.dataTransfer.files[0];
-    if (file && file.type === 'text/plain') {
+    if (!file) return;
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (ext === 'txt' || ext === 'eml' || file.type === 'text/plain' || file.type === 'message/rfc822') {
       const reader = new FileReader();
       reader.onload = ev => {
-        textarea.value = ev.target.result;
+        let content = ev.target.result;
+        if (ext === 'eml') {
+          content = parseEmlBody(content);
+        }
+        textarea.value = content;
         updateCharCount();
       };
       reader.readAsText(file);
     } else {
-      showStatus('error', 'Please drop a .txt file.');
+      showStatus('error', 'Please drop a .eml or .txt file.');
     }
   });
   dropZone.addEventListener('click', () => textarea.focus());
 });
 
+function parseEmlBody(emlContent) {
+  // Split headers from body — blank line separates them
+  const parts = emlContent.split(/\r?\n\r?\n/);
+  if (parts.length < 2) return emlContent;
+
+  // Skip the headers (first block), take the rest as body
+  let body = parts.slice(1).join('\n\n');
+
+  // Strip quoted-printable encoding (=XX hex sequences and soft line breaks)
+  body = body.replace(/=\r?\n/g, '');
+  body = body.replace(/=([0-9A-Fa-f]{2})/g, (_, hex) =>
+    String.fromCharCode(parseInt(hex, 16))
+  );
+
+  // Strip HTML if present — extract text between tags
+  if (body.includes('<html') || body.includes('<div') || body.includes('<p>')) {
+    body = body
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/p>/gi, '\n')
+      .replace(/<\/div>/gi, '\n')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"');
+  }
+
+  // Clean up excessive blank lines
+  body = body.replace(/\n{3,}/g, '\n\n').trim();
+  return body;
+}
+
+// ─── GOOGLE SHEETS CONFIGURATION ─────────────────────────────────────────────
+// To use Google Sheets for the supervisor list:
+// 1. Create a Google Sheet with supervisor names in column A (no header row)
+// 2. File → Share → Publish to web → Choose "Comma-separated values (.csv)"
+// 3. Copy the published URL and paste it below
+const SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRx7ynrRdPKx5CuHuXDV9kmJmISZUsEj2FdVk5bzEL5MLdSvBEKOkKzJuUwVpODd8ryxl6rObEbh_Ub/pub?gid=454752363&single=true&output=csv"; // e.g. "https://docs.google.com/spreadsheets/d/.../pub?output=csv"
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function loadSupervisors() {
+  const sel = document.getElementById('supervisorSelect');
+
+  // Try Google Sheets first if URL is configured
+  if (SHEETS_CSV_URL) {
+    try {
+      const res = await fetch(SHEETS_CSV_URL);
+      const csv = await res.text();
+      const names = csv.split('\n')
+        .map(line => line.replace(/^"|"$/g, '').trim())
+        .filter(name => name.length > 0);
+      if (names.length > 0) {
+        sel.innerHTML = names.map(n => `<option value="${n}">${n}</option>`).join('');
+        return;
+      }
+    } catch {
+      // Fall through to backend
+    }
+  }
+
+  // Fall back to backend supervisor list
   try {
     const res = await fetch(`${BACKEND_URL}/supervisors`);
     const names = await res.json();
-    const sel = document.getElementById('supervisorSelect');
     sel.innerHTML = names.map(n => `<option value="${n}">${n}</option>`).join('');
   } catch {
-    document.getElementById('supervisorSelect').innerHTML =
-      '<option value="Lieutenant Shawn White">Lieutenant Shawn White</option>';
+    sel.innerHTML = '<option value="Lieutenant Shawn White">Lieutenant Shawn White</option>';
   }
 }
 
