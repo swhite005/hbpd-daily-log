@@ -40,14 +40,14 @@ def thousand_block(address):
 
 def parse_incidents(raw_text):
     incidents = []
-    chunks = re.split(r'(?=DR#\s*[::])', raw_text, flags=re.IGNORECASE)
+    chunks = re.split(r'(?=DR#\s*[:])', raw_text, flags=re.IGNORECASE)
     for chunk in chunks:
         chunk = chunk.strip()
         if not chunk:
             continue
 
         def extract(label, text):
-            pattern = rf'{label}\s*[::]\s*(.*?)(?=\n\s*(?:Time|Location|Subject|Details|Officers|Arrested|DR#)\s*[::.]|\Z)'
+            pattern = rf'{label}\s*[:]\s*(.*?)(?=\n\s*(?:Time|Location|Subject|Details|Officers|Arrested|DR#)\s*[:]|\Z)'
             m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
             if m:
                 return ' '.join(m.group(1).split()).strip()
@@ -76,66 +76,51 @@ def parse_incidents(raw_text):
     return incidents
 
 
-def merge_runs_in_xml(xml):
+def fill_placeholders(xml, values):
     """
-    Merge consecutive <w:r> runs that have identical rPr so that
-    en-space placeholder sequences end up in a single <w:t> node.
-    This replicates what merge_runs.py does at build time.
+    Replace en-space placeholder groups with values.
+    Each form field placeholder is: fldCharType="separate"/></w:r>
+    followed by one or more runs each containing a single en-space \u2002.
+    We replace those trailing runs with a single run containing the value.
     """
-    # We target runs inside the same paragraph and merge their <w:t> text
-    # when the rPr content is identical.
-    def merge_para(para_xml):
-        # Find all runs
-        run_pattern = re.compile(r'<w:r(?:\s[^>]*)?>.*?</w:r>', re.DOTALL)
-        runs = list(run_pattern.finditer(para_xml))
-        if len(runs) < 2:
-            return para_xml
+    result = []
+    pos = 0
+    val_idx = 0
 
-        rpr_pattern = re.compile(r'(<w:rPr>.*?</w:rPr>)', re.DOTALL)
-        t_pattern = re.compile(r'<w:t[^>]*>([^<]*)</w:t>', re.DOTALL)
+    sep_pattern = re.compile(r'fldCharType="separate"/></w:r>')
+    en_run_pattern = re.compile(
+        r'<w:r[^>]*>(?:<w:rPr>.*?</w:rPr>)?<w:t[^>]*>\u2002</w:t></w:r>',
+        re.DOTALL
+    )
 
-        merged_runs = []
-        i = 0
-        while i < len(runs):
-            current = runs[i].group(0)
-            rpr_m = rpr_pattern.search(current)
-            current_rpr = rpr_m.group(1) if rpr_m else ''
-            t_m = t_pattern.search(current)
-            current_text = t_m.group(1) if t_m else ''
+    for sep_match in sep_pattern.finditer(xml):
+        result.append(xml[pos:sep_match.end()])
+        pos = sep_match.end()
 
-            j = i + 1
-            while j < len(runs):
-                nxt = runs[j].group(0)
-                nxt_rpr_m = rpr_pattern.search(nxt)
-                nxt_rpr = nxt_rpr_m.group(1) if nxt_rpr_m else ''
-                nxt_t_m = t_pattern.search(nxt)
-                nxt_text = nxt_t_m.group(1) if nxt_t_m else ''
+        # Consume all consecutive en-space runs
+        consumed_end = pos
+        while True:
+            en_match = en_run_pattern.match(xml, consumed_end)
+            if en_match:
+                consumed_end = en_match.end()
+            else:
+                break
 
-                # Only merge if rPr matches and both contain only en-spaces or text
-                if nxt_rpr == current_rpr and nxt_t_m:
-                    current_text += nxt_text
-                    j += 1
-                else:
-                    break
+        if val_idx < len(values):
+            val = values[val_idx]
+            val = val.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            result.append(
+                f'<w:r><w:rPr><w:rStyle w:val="Style1Char"/></w:rPr>'
+                f'<w:t xml:space="preserve">{val}</w:t></w:r>'
+            )
+            val_idx += 1
+        else:
+            result.append(xml[pos:consumed_end])
 
-            # Rebuild merged run
-            if j > i + 1:
-                space_attr = ' xml:space="preserve"' if ' ' in current_text else ''
-                merged = f'<w:r>{current_rpr}<w:t{space_attr}>{current_text}</w:t></w:r>'
-                merged_runs.append((runs[i].start(), runs[j-1].end(), merged))
-            i = j
+        pos = consumed_end
 
-        # Apply replacements in reverse
-        for start, end, replacement in reversed(merged_runs):
-            para_xml = para_xml[:start] + replacement + para_xml[end:]
-
-        return para_xml
-
-    # Process paragraph by paragraph
-    para_pattern = re.compile(r'<w:p[ >].*?</w:p>', re.DOTALL)
-    def replace_para(m):
-        return merge_para(m.group(0))
-    return para_pattern.sub(replace_para, xml)
+    result.append(xml[pos:])
+    return ''.join(result)
 
 
 def fill_template(prepared_by, date_str, incidents):
@@ -158,10 +143,6 @@ def fill_template(prepared_by, date_str, incidents):
     if 'word/document.xml' in files:
         xml = files['word/document.xml'].decode('utf-8')
 
-        # Merge split runs so en-space placeholders are in single <w:t> nodes
-        xml = merge_runs_in_xml(xml)
-
-        # Build values list
         values = [prepared_by, date_str]
         for inc in incidents:
             values.extend([
@@ -172,40 +153,12 @@ def fill_template(prepared_by, date_str, incidents):
                 inc['details'],
             ])
 
-        # Try both placeholder patterns (merged and unmerged)
-        filled = [False]
-        idx = [0]
+        xml = fill_placeholders(xml, values)
 
-        def replacer(m):
-            if idx[0] < len(values):
-                val = values[idx[0]]
-                val = val.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                idx[0] += 1
-                filled[0] = True
-                return f'{m.group(1)}<w:t xml:space="preserve">{val}</w:t>'
-            return m.group(0)
-
-        # Pattern 1: merged runs (after merge_runs_in_xml)
-        pattern1 = r'(fldCharType="separate"/>)<w:t[^>]*>[\u2002\s]+</w:t>'
-        xml = re.sub(pattern1, replacer, xml)
-
-        # Pattern 2: separate/end on same run with en-spaces between
-        if not filled[0]:
-            pattern2 = r'(fldCharType="separate"/>)\s*</w:r>\s*<w:r[^>]*>(?:<w:rPr>.*?</w:rPr>)?<w:t[^>]*>(\u2002+)</w:t>'
-            def replacer2(m):
-                if idx[0] < len(values):
-                    val = values[idx[0]]
-                    val = val.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                    idx[0] += 1
-                    return f'{m.group(1)}</w:r><w:r><w:t xml:space="preserve">{val}</w:t>'
-                return m.group(0)
-            xml = re.sub(pattern2, replacer2, xml, flags=re.DOTALL)
-
-        # Remove unfilled incident tables
+        # Remove unfilled incident tables (still contain en-spaces)
         tbl_matches = list(re.finditer(r'<w:tbl[ >].*?</w:tbl>', xml, re.DOTALL))
         empty_spans = []
         for t in tbl_matches:
-            # Check for any remaining en-spaces (unfilled placeholders)
             if '\u2002' in t.group(0):
                 empty_spans.append((t.start(), t.end()))
         for start, end in reversed(empty_spans):
