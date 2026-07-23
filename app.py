@@ -38,7 +38,7 @@ def thousand_block(address):
     rest = m.group(2)
     rest = re.sub(r'\s*(#\S+|Apt\s+\S+|Unit\s+\S+)', '', rest, flags=re.IGNORECASE).strip()
     block = (num // 100) * 100
-    return f"{block} Block of{rest}"
+    return f"{block} Block of {rest}"
 
 
 def parse_incidents(raw_text):
@@ -304,6 +304,8 @@ def generate():
         download_name=filename
     )
     response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+    response.headers['Access-Control-Expose-Headers'] = 'Content-Disposition, X-Filename'
+    response.headers['X-Filename'] = filename
     return response
 
 
