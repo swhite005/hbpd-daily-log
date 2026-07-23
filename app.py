@@ -171,7 +171,7 @@ def get_supervisors():
     return jsonify(SUPERVISORS)
 
 
-@app.route('/debug', methods=['POST'])
+@app.route('/debug', methods=['GET', 'POST'])
 def debug():
     """Debug endpoint - returns info about what the server sees in the template."""
     body = request.get_json() or {}
