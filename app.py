@@ -214,14 +214,15 @@ def fill_template(prepared_by, date_str, incidents):
     idx = 0
 
     def make_run(text):
-        """Build a Word XML run, inserting <w:br/> for paragraph breaks."""
+        """Build a Word XML run, inserting a blank line between paragraphs."""
         paragraphs = text.split('\n\n')
         parts = []
         for i, para in enumerate(paragraphs):
             escaped = para.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
             parts.append(f'<w:t xml:space="preserve">{escaped}</w:t>')
             if i < len(paragraphs) - 1:
-                parts.append('<w:br/>')
+                # Two line breaks = one blank line between paragraphs
+                parts.append('<w:br/><w:br/>')
         return f'<w:r><w:rPr><w:rStyle w:val="Style1Char"/></w:rPr>{"".join(parts)}</w:r>'
 
     def replacer(m):
