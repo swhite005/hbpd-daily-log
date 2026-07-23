@@ -393,8 +393,8 @@ def generate():
     if not incidents:
         return jsonify({"error": "No incidents could be parsed from the text"}), 400
 
-    if len(incidents) > 13:
-        return jsonify({"error": f"Template supports 13 incidents max. Found {len(incidents)}."}), 400
+    if len(incidents) > 20:
+        return jsonify({"error": f"Template supports 20 incidents max. Found {len(incidents)}."}), 400
 
     today = datetime.now()
     date_str = today.strftime("%B %-d, %Y")
