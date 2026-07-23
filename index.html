@@ -314,8 +314,8 @@
     <h2>Incident Data</h2>
 
     <div class="drop-zone" id="dropZone">
-      <strong>Drag &amp; drop a .eml or .txt file here</strong>
-      <p>or paste your incident report data below</p>
+      <strong>Drag &amp; drop one or more .eml or .txt files here</strong>
+      <p>Multiple files will be combined automatically</p>
     </div>
 
     <label for="incidentText">Paste incident data</label>
@@ -371,42 +371,83 @@ document.addEventListener('DOMContentLoaded', () => {
   dropZone.addEventListener('drop', e => {
     e.preventDefault();
     dropZone.classList.remove('drag-over');
-    const file = e.dataTransfer.files[0];
-    if (!file) return;
-    const ext = file.name.split('.').pop().toLowerCase();
-    if (ext === 'txt' || ext === 'eml' || file.type === 'text/plain' || file.type === 'message/rfc822') {
+    const files = Array.from(e.dataTransfer.files);
+    if (!files.length) return;
+
+    const validFiles = files.filter(f => {
+      const ext = f.name.split('.').pop().toLowerCase();
+      return ext === 'txt' || ext === 'eml';
+    });
+
+    if (validFiles.length === 0) {
+      showStatus('error', 'Please drop .eml or .txt files.');
+      return;
+    }
+
+    // Read all files and combine their content
+    const readers = validFiles.map(file => new Promise((resolve) => {
+      const ext = file.name.split('.').pop().toLowerCase();
       const reader = new FileReader();
       reader.onload = ev => {
         let content = ev.target.result;
-        if (ext === 'eml') {
-          content = parseEmlBody(content);
-        }
-        textarea.value = content;
-        updateCharCount();
+        if (ext === 'eml') content = parseEmlBody(content);
+        resolve(content.trim());
       };
       reader.readAsText(file);
-    } else {
-      showStatus('error', 'Please drop a .eml or .txt file.');
-    }
+    }));
+
+    Promise.all(readers).then(contents => {
+      textarea.value = contents.join('\n\n');
+      updateCharCount();
+      showStatus('success', `✅ ${validFiles.length} file(s) loaded.`);
+    });
   });
   dropZone.addEventListener('click', () => textarea.focus());
 });
 
 function parseEmlBody(emlContent) {
-  // Split headers from body — blank line separates them
-  const parts = emlContent.split(/\r?\n\r?\n/);
-  if (parts.length < 2) return emlContent;
+  // Find all MIME parts and extract the best text/plain one
+  const transferEncMatch = emlContent.match(/Content-Transfer-Encoding:\s*(\S+)/i);
+  const isBase64 = transferEncMatch && transferEncMatch[1].toLowerCase() === 'base64';
 
-  // Skip the headers (first block), take the rest as body
-  let body = parts.slice(1).join('\n\n');
-
-  // Strip quoted-printable encoding (=XX hex sequences and soft line breaks)
-  body = body.replace(/=\r?\n/g, '');
-  body = body.replace(/=([0-9A-Fa-f]{2})/g, (_, hex) =>
-    String.fromCharCode(parseInt(hex, 16))
+  // Try to find a text/plain section with base64 encoding
+  const b64Match = emlContent.match(
+    /Content-Type:\s*text\/plain[^\r\n]*[\r\n]+(?:[^\r\n]+[\r\n]+)*?Content-Transfer-Encoding:\s*base64[\r\n]+[\r\n]+([\s\S]+?)(?=\r?\n--|\r?\n\r?\nContent-Type:|\Z)/i
   );
 
-  // Strip HTML if present — extract text between tags
+  if (b64Match) {
+    try {
+      const b64 = b64Match[1].trim();
+      const decoded = atob(b64.replace(/\s/g, ''));
+      // Convert bytes to string handling UTF-8
+      const bytes = new Uint8Array([...decoded].map(c => c.charCodeAt(0)));
+      let text = new TextDecoder('utf-8').decode(bytes);
+      // Clean up BOM and excessive whitespace
+      text = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').trim();
+      return text;
+    } catch(e) {
+      // Fall through to plain text parsing
+    }
+  }
+
+  // Try quoted-printable text/plain section
+  const qpMatch = emlContent.match(
+    /Content-Type:\s*text\/plain[^\r\n]*[\r\n]+(?:[^\r\n]+[\r\n]+)*?Content-Transfer-Encoding:\s*quoted-printable[\r\n]+[\r\n]+([\s\S]+?)(?=\r?\n--|\Z)/i
+  );
+  if (qpMatch) {
+    let body = qpMatch[1];
+    body = body.replace(/=\r?\n/g, '');
+    body = body.replace(/=([0-9A-Fa-f]{2})/g, (_, hex) =>
+      String.fromCharCode(parseInt(hex, 16))
+    );
+    return body.trim();
+  }
+
+  // Fall back: split on blank line and take body, stripping HTML
+  const parts = emlContent.split(/\r?\n\r?\n/);
+  if (parts.length < 2) return emlContent;
+  let body = parts.slice(1).join('\n\n');
+
   if (body.includes('<html') || body.includes('<div') || body.includes('<p>')) {
     body = body
       .replace(/<br\s*\/?>/gi, '\n')
@@ -420,9 +461,7 @@ function parseEmlBody(emlContent) {
       .replace(/&quot;/g, '"');
   }
 
-  // Clean up excessive blank lines
-  body = body.replace(/\n{3,}/g, '\n\n').trim();
-  return body;
+  return body.replace(/\n{3,}/g, '\n\n').trim();
 }
 
 // ─── GOOGLE SHEETS CONFIGURATION ─────────────────────────────────────────────
@@ -430,7 +469,7 @@ function parseEmlBody(emlContent) {
 // 1. Create a Google Sheet with supervisor names in column A (no header row)
 // 2. File → Share → Publish to web → Choose "Comma-separated values (.csv)"
 // 3. Copy the published URL and paste it below
-const SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRx7ynrRdPKx5CuHuXDV9kmJmISZUsEj2FdVk5bzEL5MLdSvBEKOkKzJuUwVpODd8ryxl6rObEbh_Ub/pub?gid=454752363&single=true&output=csv"; // e.g. "https://docs.google.com/spreadsheets/d/.../pub?output=csv"
+const SHEETS_CSV_URL = ""; // e.g. "https://docs.google.com/spreadsheets/d/.../pub?output=csv"
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function loadSupervisors() {
