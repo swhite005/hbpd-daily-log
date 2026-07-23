@@ -56,18 +56,37 @@ def parse_incidents(raw_text):
                 return ' '.join(m.group(1).split()).strip()
             return "N/A"
 
+        def extract_details(text):
+            pattern = r'Details\s*[:]\s*(.*?)(?=\n\s*(?:Officers|Arrested|DR#)\s*[:]|\Z)'
+            m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+            if not m:
+                return "N/A"
+            raw = m.group(1)
+            # Preserve paragraph breaks — collapse whitespace within each paragraph
+            # but keep blank lines between paragraphs
+            paragraphs = re.split(r'\n\s*\n', raw)
+            cleaned = []
+            for para in paragraphs:
+                para = para.strip()
+                if para:
+                    # Collapse newlines within a paragraph to single space
+                    para = ' '.join(para.split())
+                    cleaned.append(para)
+            return '\n\n'.join(cleaned).strip()
+
         dr = extract('DR#', chunk)
         time_val = extract('Time', chunk)
         location = extract('Location', chunk)
         subject = extract('Subject', chunk)
-        details = extract('Details', chunk)
+        details = extract_details(chunk)
 
         if dr == "N/A" and time_val == "N/A":
             continue
 
         location = thousand_block(location)
         details = re.sub(r'image\d+\.\w+', '', details, flags=re.IGNORECASE).strip()
-        details = re.sub(r'\s{2,}', ' ', details)
+        details = re.sub(r'\[cid:[^\]]+\]', '', details).strip()
+        details = re.sub(r'\n{3,}', '\n\n', details).strip()
 
         incidents.append({
             "dr": dr,
@@ -194,12 +213,23 @@ def fill_template(prepared_by, date_str, incidents):
     placeholder_pattern = r'(fldCharType="separate"/></w:r>)<w:r[^>]*>(?:<w:rPr>.*?</w:rPr>)?<w:t[^>]*>[\u2002]+</w:t></w:r>'
     idx = 0
 
+    def make_run(text):
+        """Build a Word XML run, inserting <w:br/> for paragraph breaks."""
+        paragraphs = text.split('\n\n')
+        parts = []
+        for i, para in enumerate(paragraphs):
+            escaped = para.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            parts.append(f'<w:t xml:space="preserve">{escaped}</w:t>')
+            if i < len(paragraphs) - 1:
+                parts.append('<w:br/>')
+        return f'<w:r><w:rPr><w:rStyle w:val="Style1Char"/></w:rPr>{"".join(parts)}</w:r>'
+
     def replacer(m):
         nonlocal idx
         if idx < len(values):
-            val = values[idx].replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            val = values[idx]
             idx += 1
-            return f'{m.group(1)}<w:r><w:rPr><w:rStyle w:val="Style1Char"/></w:rPr><w:t xml:space="preserve">{val}</w:t></w:r>'
+            return f'{m.group(1)}{make_run(val)}'
         return m.group(0)
 
     xml = re.sub(placeholder_pattern, replacer, xml, flags=re.DOTALL)
