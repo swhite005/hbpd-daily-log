@@ -91,13 +91,13 @@ def fill_template(prepared_by, date_str, incidents):
         with zipfile.ZipFile(template_copy, 'r') as z:
             z.extractall(unpack_dir)
 
-        # 2. Merge runs so placeholders are single <w:t> nodes
+        # 2. Merge runs
         subprocess.run(
-            ['python', MERGE_RUNS_SCRIPT, unpack_dir + '/'],
+            ['python3', MERGE_RUNS_SCRIPT, unpack_dir + '/'],
             capture_output=True
         )
 
-        # 3. Fix Content_Types (template -> document)
+        # 3. Fix Content_Types
         ct_path = os.path.join(unpack_dir, '[Content_Types].xml')
         with open(ct_path, 'r') as f:
             ct = f.read()
@@ -108,10 +108,13 @@ def fill_template(prepared_by, date_str, incidents):
         with open(ct_path, 'w') as f:
             f.write(ct)
 
-        # 4. Fill placeholders in document.xml
+        # 4. Fill placeholders
         doc_path = os.path.join(unpack_dir, 'word', 'document.xml')
         with open(doc_path, 'r', encoding='utf-8') as f:
             xml = f.read()
+
+        # Count placeholders before filling
+        placeholder_count = len(re.findall(r'fldCharType="separate"/>(<w:t>[^<]*</w:t>)', xml))
 
         values = [prepared_by, date_str]
         for inc in incidents:
@@ -135,6 +138,7 @@ def fill_template(prepared_by, date_str, incidents):
             return m.group(0)
 
         xml = re.sub(placeholder_pattern, replacer, xml)
+        fields_filled = idx
 
         # 5. Remove unfilled incident tables
         tbl_matches = list(re.finditer(r'<w:tbl[ >].*?</w:tbl>', xml, re.DOTALL))
@@ -146,7 +150,7 @@ def fill_template(prepared_by, date_str, incidents):
         with open(doc_path, 'w', encoding='utf-8') as f:
             f.write(xml)
 
-        # 6. Repack into docx
+        # 6. Repack
         out_path = os.path.join(work_dir, "output.docx")
         with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_DEFLATED) as zout:
             for root, dirs, files in os.walk(unpack_dir):
@@ -156,7 +160,7 @@ def fill_template(prepared_by, date_str, incidents):
                     zout.write(filepath, arcname)
 
         with open(out_path, 'rb') as f:
-            return f.read()
+            return f.read(), fields_filled, placeholder_count
 
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
@@ -165,6 +169,50 @@ def fill_template(prepared_by, date_str, incidents):
 @app.route('/supervisors', methods=['GET'])
 def get_supervisors():
     return jsonify(SUPERVISORS)
+
+
+@app.route('/debug', methods=['POST'])
+def debug():
+    """Debug endpoint - returns info about what the server sees in the template."""
+    body = request.get_json() or {}
+    raw_text = body.get('text', 'DR#:\n26-000001\nTime:\n8:00 AM\nLocation:\nTest Location\nSubject:\nTest Subject\nDetails:\nTest details.')
+
+    incidents = parse_incidents(raw_text)
+
+    work_dir = tempfile.mkdtemp()
+    try:
+        template_copy = os.path.join(work_dir, "template.docx")
+        shutil.copy(TEMPLATE_PATH, template_copy)
+        unpack_dir = os.path.join(work_dir, "unpacked")
+        os.makedirs(unpack_dir)
+        with zipfile.ZipFile(template_copy, 'r') as z:
+            z.extractall(unpack_dir)
+
+        merge_result = subprocess.run(
+            ['python3', MERGE_RUNS_SCRIPT, unpack_dir + '/'],
+            capture_output=True, text=True
+        )
+
+        doc_path = os.path.join(unpack_dir, 'word', 'document.xml')
+        with open(doc_path, 'r') as f:
+            xml = f.read()
+
+        placeholders = re.findall(r'fldCharType="separate"/>(<w:t>[^<]*</w:t>)', xml)
+        en_spaces = xml.count('\u2002')
+        sample = xml[xml.find('fldCharType="separate"'):xml.find('fldCharType="separate"')+200] if 'fldCharType="separate"' in xml else 'NOT FOUND'
+
+        return jsonify({
+            "merge_runs_output": merge_result.stdout,
+            "merge_runs_script_exists": os.path.exists(MERGE_RUNS_SCRIPT),
+            "template_exists": os.path.exists(TEMPLATE_PATH),
+            "placeholder_count": len(placeholders),
+            "en_space_count": en_spaces,
+            "sample_context": sample,
+            "incidents_parsed": len(incidents),
+            "first_incident": incidents[0] if incidents else None,
+        })
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 @app.route('/generate', methods=['POST'])
@@ -191,16 +239,24 @@ def generate():
     filename = today.strftime("%m-%d-%Y") + ".docx"
 
     try:
-        docx_bytes = fill_template(prepared_by, date_str, incidents)
+        docx_bytes, fields_filled, placeholder_count = fill_template(prepared_by, date_str, incidents)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-    return send_file(
+    if fields_filled == 0:
+        return jsonify({
+            "error": f"Template placeholders not found. placeholder_count={placeholder_count}. Deploy may need merge_runs.py."
+        }), 500
+
+    response = send_file(
         io.BytesIO(docx_bytes),
         mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
         as_attachment=True,
         download_name=filename
     )
+    response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+    response.headers['X-Filename'] = filename
+    return response
 
 
 if __name__ == '__main__':
