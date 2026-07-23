@@ -305,7 +305,7 @@
     <h2>Prepared By</h2>
     <label for="supervisorSelect">Supervisor</label>
     <select id="supervisorSelect">
-      <option value="">Loading…</option>
+      <option value="">Select From Dropdown</option>
     </select>
   </div>
 
@@ -413,7 +413,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const newContent = contents.join('\n\n');
       textarea.value = existing ? existing + '\n\n' + newContent : newContent;
       updateCharCount();
-      showStatus('success', `✅ ${validFiles.length} file(s) added. Drop more or click Generate.`);
+      const totalFiles = validFiles.length;
+      const totalIncidents = (textarea.value.match(/DR#\s*:/gi) || []).length;
+      showStatus('success', `✅ ${totalFiles} file(s) added — ${totalIncidents} incident(s) detected. Drop more or click Generate.`);
     });
   });
   dropZone.addEventListener('click', () => textarea.focus());
