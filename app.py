@@ -174,7 +174,7 @@ def get_supervisors():
 @app.route('/debug', methods=['GET', 'POST'])
 def debug():
     """Debug endpoint - returns info about what the server sees in the template."""
-    body = request.get_json() or {}
+    body = request.get_json(silent=True) or {}
     raw_text = body.get('text', 'DR#:\n26-000001\nTime:\n8:00 AM\nLocation:\nTest Location\nSubject:\nTest Subject\nDetails:\nTest details.')
 
     incidents = parse_incidents(raw_text)
