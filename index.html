@@ -406,62 +406,73 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function parseEmlBody(emlContent) {
-  // Find all MIME parts and extract the best text/plain one
-  const transferEncMatch = emlContent.match(/Content-Transfer-Encoding:\s*(\S+)/i);
-  const isBase64 = transferEncMatch && transferEncMatch[1].toLowerCase() === 'base64';
 
-  // Try to find a text/plain section with base64 encoding
+  function decodeQP(text) {
+    return text
+      .replace(/=\r?\n/g, '')
+      .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+  }
+
+  function stripFooter(text) {
+    // Stop at common email footer patterns
+    const cutoffs = [
+      /\n+2000 Main Street/i,
+      /\n+Huntington Beach Police Department\s*\n+[^D]/i,
+      /\n+https?:\/\/www\.(facebook|twitter|youtube)/i,
+      /\n+\[cid:/i,
+    ];
+    for (const pattern of cutoffs) {
+      const m = text.search(pattern);
+      if (m > 100) text = text.substring(0, m);
+    }
+    return text.trim();
+  }
+
+  // Try base64 text/plain first
   const b64Match = emlContent.match(
-    /Content-Type:\s*text\/plain[^\r\n]*[\r\n]+(?:[^\r\n]+[\r\n]+)*?Content-Transfer-Encoding:\s*base64[\r\n]+[\r\n]+([\s\S]+?)(?=\r?\n--|\r?\n\r?\nContent-Type:|\Z)/i
+    /Content-Type:\s*text\/plain[^\r\n]*[\r\n]+(?:[A-Za-z-]+:[^\r\n]+[\r\n]+)*Content-Transfer-Encoding:\s*base64[\r\n]+[\r\n]+([\s\S]+?)(?=\r?\n--)/i
   );
-
   if (b64Match) {
     try {
-      const b64 = b64Match[1].trim();
-      const decoded = atob(b64.replace(/\s/g, ''));
-      // Convert bytes to string handling UTF-8
+      const b64 = b64Match[1].trim().replace(/\s/g, '');
+      const decoded = atob(b64);
       const bytes = new Uint8Array([...decoded].map(c => c.charCodeAt(0)));
       let text = new TextDecoder('utf-8').decode(bytes);
-      // Clean up BOM and excessive whitespace
       text = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').trim();
-      return text;
-    } catch(e) {
-      // Fall through to plain text parsing
-    }
+      return stripFooter(text);
+    } catch(e) { /* fall through */ }
   }
 
-  // Try quoted-printable text/plain section
+  // Try quoted-printable text/plain
   const qpMatch = emlContent.match(
-    /Content-Type:\s*text\/plain[^\r\n]*[\r\n]+(?:[^\r\n]+[\r\n]+)*?Content-Transfer-Encoding:\s*quoted-printable[\r\n]+[\r\n]+([\s\S]+?)(?=\r?\n--|\Z)/i
+    /Content-Type:\s*text\/plain[^\r\n]*[\r\n]+(?:[A-Za-z-]+:[^\r\n]+[\r\n]+)*Content-Transfer-Encoding:\s*quoted-printable[\r\n]+[\r\n]+([\s\S]+?)(?=\r?\n--)/i
   );
   if (qpMatch) {
-    let body = qpMatch[1];
-    body = body.replace(/=\r?\n/g, '');
-    body = body.replace(/=([0-9A-Fa-f]{2})/g, (_, hex) =>
-      String.fromCharCode(parseInt(hex, 16))
-    );
-    return body.trim();
+    let text = decodeQP(qpMatch[1]);
+    text = text.replace(/\r\n/g, '\n').trim();
+    return stripFooter(text);
   }
 
-  // Fall back: split on blank line and take body, stripping HTML
+  // Try plain text/plain with no special encoding
+  const plainMatch = emlContent.match(
+    /Content-Type:\s*text\/plain[^\r\n]*[\r\n]+[\r\n]+([\s\S]+?)(?=\r?\n--)/i
+  );
+  if (plainMatch) {
+    return stripFooter(plainMatch[1].replace(/\r\n/g, '\n').trim());
+  }
+
+  // Last resort: split on blank line, take body, strip HTML
   const parts = emlContent.split(/\r?\n\r?\n/);
   if (parts.length < 2) return emlContent;
   let body = parts.slice(1).join('\n\n');
-
-  if (body.includes('<html') || body.includes('<div') || body.includes('<p>')) {
+  if (body.includes('<html') || body.includes('<div')) {
     body = body
-      .replace(/<br\s*\/?>/gi, '\n')
-      .replace(/<\/p>/gi, '\n')
-      .replace(/<\/div>/gi, '\n')
-      .replace(/<[^>]+>/g, '')
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"');
+      .replace(/<br\s*\/?>/gi, '\n').replace(/<\/p>/gi, '\n')
+      .replace(/<\/div>/gi, '\n').replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>');
   }
-
-  return body.replace(/\n{3,}/g, '\n\n').trim();
+  return stripFooter(body.replace(/\n{3,}/g, '\n\n').trim());
 }
 
 // ─── GOOGLE SHEETS CONFIGURATION ─────────────────────────────────────────────
