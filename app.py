@@ -43,6 +43,14 @@ def thousand_block(address):
 
 def parse_incidents(raw_text):
     incidents = []
+
+    # Extract any update text that appears BEFORE the first DR# and associates
+    # it with a DR# mentioned in that same paragraph block
+    pre_dr_text = ''
+    first_dr_pos = re.search(r'DR#\s*:', raw_text, re.IGNORECASE)
+    if first_dr_pos and first_dr_pos.start() > 0:
+        pre_dr_text = raw_text[:first_dr_pos.start()].strip()
+
     chunks = re.split(r'(?=DR#\s*[:])', raw_text, flags=re.IGNORECASE)
     for chunk in chunks:
         chunk = chunk.strip()
@@ -95,7 +103,52 @@ def parse_incidents(raw_text):
             "subject": subject,
             "details": details,
         })
-    return incidents
+
+    # Deduplicate: if the same DR# appears more than once, merge the entries.
+    # The first occurrence is kept as the base; subsequent occurrences append
+    # updated details under an "Update:" heading rather than creating a duplicate.
+    seen = {}      # dr -> index in deduped list
+    deduped = []
+    for inc in incidents:
+        dr = inc['dr']
+        # Normalize DR# for comparison (strip spaces)
+        dr_key = re.sub(r'\s+', '', dr).upper()
+
+        if dr_key in seen:
+            # This is an update to an existing entry — append only if new info
+            existing = deduped[seen[dr_key]]
+            update_details = inc['details']
+            if update_details and update_details != "N/A":
+                if existing['details'] and existing['details'] != "N/A":
+                    # Only append if the update text is genuinely different
+                    norm_existing = re.sub(r'\s+', ' ', existing['details']).strip()
+                    norm_update = re.sub(r'\s+', ' ', update_details).strip()
+                    if norm_update != norm_existing:
+                        existing['details'] += '\n\nUpdate: ' + update_details
+                else:
+                    existing['details'] = update_details
+            # Also update subject if the update has a more specific one
+            if inc['subject'] != "N/A" and inc['subject'] != existing['subject']:
+                existing['subject'] = inc['subject']
+        else:
+            seen[dr_key] = len(deduped)
+            deduped.append(inc)
+
+    # If there was pre-DR# update text, find which DR# it references and prepend
+    if pre_dr_text:
+        # Look for a DR# mentioned in the update paragraph
+        ref_dr = re.search(r'26-\d+', pre_dr_text)
+        if ref_dr:
+            ref_key = re.sub(r'\s+', '', ref_dr.group(0)).upper()
+            if ref_key in seen:
+                existing = deduped[seen[ref_key]]
+                clean_pre = re.sub(r'\s{2,}', ' ', pre_dr_text).strip()
+                if existing['details'] and existing['details'] != 'N/A':
+                    existing['details'] += '\n\nUpdate: ' + clean_pre
+                else:
+                    existing['details'] = 'Update: ' + clean_pre
+
+    return deduped
 
 
 def merge_runs_xml(xml_bytes):
