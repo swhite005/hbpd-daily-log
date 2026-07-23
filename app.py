@@ -3,6 +3,8 @@ import os
 import io
 import zipfile
 import tempfile
+import shutil
+import subprocess
 from datetime import datetime
 from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
@@ -11,6 +13,7 @@ app = Flask(__name__)
 CORS(app)
 
 TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "DAILY_LOG_TEMPLATE.dotx")
+MERGE_RUNS_SCRIPT = os.path.join(os.path.dirname(__file__), "merge_runs.py")
 
 SUPERVISORS = [
     "Lieutenant Shawn White",
@@ -76,72 +79,39 @@ def parse_incidents(raw_text):
     return incidents
 
 
-def fill_placeholders(xml, values):
-    """
-    Replace en-space placeholder groups with values.
-    Each form field placeholder is: fldCharType="separate"/></w:r>
-    followed by one or more runs each containing a single en-space \u2002.
-    We replace those trailing runs with a single run containing the value.
-    """
-    result = []
-    pos = 0
-    val_idx = 0
-
-    sep_pattern = re.compile(r'fldCharType="separate"/></w:r>')
-    en_run_pattern = re.compile(
-        r'<w:r[^>]*>(?:<w:rPr>.*?</w:rPr>)?<w:t[^>]*>\u2002</w:t></w:r>',
-        re.DOTALL
-    )
-
-    for sep_match in sep_pattern.finditer(xml):
-        result.append(xml[pos:sep_match.end()])
-        pos = sep_match.end()
-
-        # Consume all consecutive en-space runs
-        consumed_end = pos
-        while True:
-            en_match = en_run_pattern.match(xml, consumed_end)
-            if en_match:
-                consumed_end = en_match.end()
-            else:
-                break
-
-        if val_idx < len(values):
-            val = values[val_idx]
-            val = val.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-            result.append(
-                f'<w:r><w:rPr><w:rStyle w:val="Style1Char"/></w:rPr>'
-                f'<w:t xml:space="preserve">{val}</w:t></w:r>'
-            )
-            val_idx += 1
-        else:
-            result.append(xml[pos:consumed_end])
-
-        pos = consumed_end
-
-    result.append(xml[pos:])
-    return ''.join(result)
-
-
 def fill_template(prepared_by, date_str, incidents):
-    with open(TEMPLATE_PATH, 'rb') as f:
-        template_bytes = f.read()
+    work_dir = tempfile.mkdtemp()
+    try:
+        # 1. Copy template and unpack
+        template_copy = os.path.join(work_dir, "template.docx")
+        shutil.copy(TEMPLATE_PATH, template_copy)
 
-    files = {}
-    with zipfile.ZipFile(io.BytesIO(template_bytes), 'r') as zin:
-        for item in zin.infolist():
-            fname = item.filename
-            files[fname] = zin.read(fname)
+        unpack_dir = os.path.join(work_dir, "unpacked")
+        os.makedirs(unpack_dir)
+        with zipfile.ZipFile(template_copy, 'r') as z:
+            z.extractall(unpack_dir)
 
-    # Fix Content_Types
-    if '[Content_Types].xml' in files:
-        files['[Content_Types].xml'] = files['[Content_Types].xml'].replace(
-            b'wordprocessingml.template.main+xml',
-            b'wordprocessingml.document.main+xml'
+        # 2. Merge runs so placeholders are single <w:t> nodes
+        subprocess.run(
+            ['python', MERGE_RUNS_SCRIPT, unpack_dir + '/'],
+            capture_output=True
         )
 
-    if 'word/document.xml' in files:
-        xml = files['word/document.xml'].decode('utf-8')
+        # 3. Fix Content_Types (template -> document)
+        ct_path = os.path.join(unpack_dir, '[Content_Types].xml')
+        with open(ct_path, 'r') as f:
+            ct = f.read()
+        ct = ct.replace(
+            'wordprocessingml.template.main+xml',
+            'wordprocessingml.document.main+xml'
+        )
+        with open(ct_path, 'w') as f:
+            f.write(ct)
+
+        # 4. Fill placeholders in document.xml
+        doc_path = os.path.join(unpack_dir, 'word', 'document.xml')
+        with open(doc_path, 'r', encoding='utf-8') as f:
+            xml = f.read()
 
         values = [prepared_by, date_str]
         for inc in incidents:
@@ -153,31 +123,43 @@ def fill_template(prepared_by, date_str, incidents):
                 inc['details'],
             ])
 
-        xml = fill_placeholders(xml, values)
+        placeholder_pattern = r'(fldCharType="separate"/>)<w:t>[^<]*</w:t>'
+        idx = 0
 
-        # Remove unfilled incident tables (still contain en-spaces)
+        def replacer(m):
+            nonlocal idx
+            if idx < len(values):
+                val = values[idx].replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                idx += 1
+                return f'{m.group(1)}<w:t xml:space="preserve">{val}</w:t>'
+            return m.group(0)
+
+        xml = re.sub(placeholder_pattern, replacer, xml)
+
+        # 5. Remove unfilled incident tables
         tbl_matches = list(re.finditer(r'<w:tbl[ >].*?</w:tbl>', xml, re.DOTALL))
-        empty_spans = []
-        for t in tbl_matches:
-            if '\u2002' in t.group(0):
-                empty_spans.append((t.start(), t.end()))
+        empty_spans = [(t.start(), t.end()) for t in tbl_matches
+                       if '\u2002\u2002\u2002\u2002\u2002' in t.group(0)]
         for start, end in reversed(empty_spans):
             xml = xml[:start] + xml[end:]
 
-        files['word/document.xml'] = xml.encode('utf-8')
+        with open(doc_path, 'w', encoding='utf-8') as f:
+            f.write(xml)
 
-    # Write to temp file to avoid in-memory zip corruption
-    with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as tmp:
-        tmp_path = tmp.name
+        # 6. Repack into docx
+        out_path = os.path.join(work_dir, "output.docx")
+        with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_DEFLATED) as zout:
+            for root, dirs, files in os.walk(unpack_dir):
+                for file in files:
+                    filepath = os.path.join(root, file)
+                    arcname = os.path.relpath(filepath, unpack_dir)
+                    zout.write(filepath, arcname)
 
-    try:
-        with zipfile.ZipFile(tmp_path, 'w', zipfile.ZIP_DEFLATED) as zout:
-            for fname, data in files.items():
-                zout.writestr(fname, data)
-        with open(tmp_path, 'rb') as f:
+        with open(out_path, 'rb') as f:
             return f.read()
+
     finally:
-        os.unlink(tmp_path)
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 @app.route('/supervisors', methods=['GET'])
