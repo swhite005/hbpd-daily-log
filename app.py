@@ -2,6 +2,7 @@ import re
 import os
 import io
 import zipfile
+import tempfile
 from datetime import datetime
 from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
@@ -19,7 +20,7 @@ SUPERVISORS = [
 ]
 
 def thousand_block(address):
-    business_indicators = ["@", "(", "\u2013", "\u2014", "-", "Hwy", "Park", "Beach", "Plaza",
+    business_indicators = ["@", "(", "\u2013", "\u2014", "Hwy", "Park", "Beach", "Plaza",
                            "Channel", "Trail", "River", "Lake", "Pier", "Circle",
                            "School", "Market", "Store", "Hospital", "Library"]
     for indicator in business_indicators:
@@ -53,12 +54,12 @@ def parse_incidents(raw_text):
             return "N/A"
 
         dr = extract('DR#', chunk)
-        time = extract('Time', chunk)
+        time_val = extract('Time', chunk)
         location = extract('Location', chunk)
         subject = extract('Subject', chunk)
         details = extract('Details', chunk)
 
-        if dr == "N/A" and time == "N/A":
+        if dr == "N/A" and time_val == "N/A":
             continue
 
         location = thousand_block(location)
@@ -67,7 +68,7 @@ def parse_incidents(raw_text):
 
         incidents.append({
             "dr": dr,
-            "time": time,
+            "time": time_val,
             "location": location,
             "subject": subject,
             "details": details,
@@ -76,83 +77,81 @@ def parse_incidents(raw_text):
 
 
 def fill_template(prepared_by, date_str, incidents):
+    # Read template into memory
     with open(TEMPLATE_PATH, 'rb') as f:
         template_bytes = f.read()
 
-    buf = io.BytesIO(template_bytes)
-    out_buf = io.BytesIO()
+    # Extract all files from the template zip
+    files = {}
+    with zipfile.ZipFile(io.BytesIO(template_bytes), 'r') as zin:
+        for item in zin.infolist():
+            fname = item.filename
+            files[fname] = zin.read(fname)
 
-    with zipfile.ZipFile(buf, 'r') as zin:
-        with zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
-            for item in zin.infolist():
-                # Support both .name and .filename across Python versions
-                item_name = item.filename if hasattr(item, 'filename') else item.name
-                data = zin.read(item_name)
+    # Fix Content_Types
+    if '[Content_Types].xml' in files:
+        files['[Content_Types].xml'] = files['[Content_Types].xml'].replace(
+            b'wordprocessingml.template.main+xml',
+            b'wordprocessingml.document.main+xml'
+        )
 
-                if item_name == '[Content_Types].xml':
-                    data = data.replace(
-                        b'wordprocessingml.template.main+xml',
-                        b'wordprocessingml.document.main+xml'
-                    )
+    # Process document.xml
+    if 'word/document.xml' in files:
+        xml = files['word/document.xml'].decode('utf-8')
 
-                elif item_name == 'word/document.xml':
-                    xml = data.decode('utf-8')
+        # Build values
+        values = [prepared_by, date_str]
+        for inc in incidents:
+            values.extend([
+                inc['time'],
+                inc['location'],
+                inc['dr'],
+                inc['subject'],
+                inc['details'],
+            ])
 
-                    # Merge split en-space runs into single placeholder
-                    def merge_en_spaces(x):
-                        prev = None
-                        while prev != x:
-                            prev = x
-                            x = re.sub(
-                                r'(<w:t[^>]*>\u2002+</w:t></w:r>)\s*(<w:r[^>]*>(?:<w:rPr>.*?</w:rPr>)?<w:t[^>]*>)(\u2002+)(</w:t></w:r>)',
-                                lambda m: m.group(1)[:-len('</w:t></w:r>')] + m.group(3) + '</w:t></w:r>',
-                                x, flags=re.DOTALL
-                            )
-                        return x
+        # Fill placeholders - handle both merged and split en-space patterns
+        placeholder_pattern = r'(fldCharType="separate"/>)\s*<w:t[^>]*>[\s\u2002]+</w:t>'
+        idx = 0
 
-                    xml = merge_en_spaces(xml)
+        def replacer(m):
+            nonlocal idx
+            if idx < len(values):
+                val = values[idx]
+                val = val.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                idx += 1
+                return f'{m.group(1)}<w:t xml:space="preserve">{val}</w:t>'
+            return m.group(0)
 
-                    values = [prepared_by, date_str]
-                    for inc in incidents:
-                        values.extend([
-                            inc['time'],
-                            inc['location'],
-                            inc['dr'],
-                            inc['subject'],
-                            inc['details'],
-                        ])
+        xml = re.sub(placeholder_pattern, replacer, xml)
 
-                    placeholder_pattern = r'(fldCharType="separate"/>)\s*<w:t[^>]*>\s*\u2002+\s*</w:t>'
-                    idx = 0
+        # Remove unfilled incident tables
+        tbl_matches = list(re.finditer(r'<w:tbl[ >].*?</w:tbl>', xml, re.DOTALL))
+        empty_spans = []
+        for t in tbl_matches:
+            fields_in_tbl = re.findall(
+                r'fldCharType="separate"/>\s*<w:t[^>]*>\s*([^<]*)\s*</w:t>', t.group(0)
+            )
+            if fields_in_tbl and any('\u2002' in f for f in fields_in_tbl):
+                empty_spans.append((t.start(), t.end()))
+        for start, end in reversed(empty_spans):
+            xml = xml[:start] + xml[end:]
 
-                    def replacer(m):
-                        nonlocal idx
-                        if idx < len(values):
-                            val = values[idx]
-                            val = val.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                            idx += 1
-                            return f'{m.group(1)}<w:t xml:space="preserve">{val}</w:t>'
-                        return m.group(0)
+        files['word/document.xml'] = xml.encode('utf-8')
 
-                    xml = re.sub(placeholder_pattern, replacer, xml)
+    # Write to a temp file first, then read back — avoids in-memory zip corruption
+    with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as tmp:
+        tmp_path = tmp.name
 
-                    # Remove unfilled incident tables
-                    tbl_matches = list(re.finditer(r'<w:tbl[ >].*?</w:tbl>', xml, re.DOTALL))
-                    empty_spans = []
-                    for t in tbl_matches:
-                        fields_in_tbl = re.findall(
-                            r'fldCharType="separate"/>\s*<w:t[^>]*>\s*([^<]*)\s*</w:t>', t.group(0)
-                        )
-                        if fields_in_tbl and any('\u2002' in f for f in fields_in_tbl):
-                            empty_spans.append((t.start(), t.end()))
-                    for start, end in reversed(empty_spans):
-                        xml = xml[:start] + xml[end:]
+    try:
+        with zipfile.ZipFile(tmp_path, 'w', zipfile.ZIP_DEFLATED) as zout:
+            for fname, data in files.items():
+                zout.writestr(fname, data)
 
-                    data = xml.encode('utf-8')
-
-                zout.writestr(item_name, data)
-
-    return out_buf.getvalue()
+        with open(tmp_path, 'rb') as f:
+            return f.read()
+    finally:
+        os.unlink(tmp_path)
 
 
 @app.route('/supervisors', methods=['GET'])
