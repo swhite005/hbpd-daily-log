@@ -4,16 +4,15 @@ import io
 import zipfile
 import tempfile
 import shutil
-import subprocess
 from datetime import datetime
 from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
+from xml.dom import minidom
 
 app = Flask(__name__)
 CORS(app)
 
 TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "DAILY_LOG_TEMPLATE.dotx")
-MERGE_RUNS_SCRIPT = os.path.join(os.path.dirname(__file__), "merge_runs.py")
 
 SUPERVISORS = [
     "Lieutenant Shawn White",
@@ -21,6 +20,7 @@ SUPERVISORS = [
     "Lieutenant Jane Doe",
     "Sergeant Mike Johnson",
 ]
+
 
 def thousand_block(address):
     business_indicators = ["@", "(", "\u2013", "\u2014", "Hwy", "Park", "Beach", "Plaza",
@@ -79,91 +79,151 @@ def parse_incidents(raw_text):
     return incidents
 
 
+def merge_runs_xml(xml_bytes):
+    """
+    Inline run merger using minidom — no external dependencies.
+    Merges adjacent runs with identical rPr so en-space placeholders
+    end up in a single <w:t> node that our regex can match.
+    """
+    dom = minidom.parseString(xml_bytes)
+
+    W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+    def get_rpr_xml(run):
+        for child in run.childNodes:
+            if child.nodeType == child.ELEMENT_NODE and child.localName == 'rPr':
+                return child.toxml()
+        return ''
+
+    def get_t_text(run):
+        texts = []
+        for child in run.childNodes:
+            if child.nodeType == child.ELEMENT_NODE and child.localName == 't':
+                for tc in child.childNodes:
+                    if tc.nodeType in (tc.TEXT_NODE, tc.CDATA_SECTION_NODE):
+                        texts.append(tc.data)
+        return ''.join(texts)
+
+    def has_only_t(run):
+        """Run contains only rPr and t elements (no fldChar, tab, etc.)"""
+        for child in run.childNodes:
+            if child.nodeType == child.ELEMENT_NODE:
+                if child.localName not in ('rPr', 't'):
+                    return False
+        return True
+
+    # Process each paragraph
+    for para in dom.getElementsByTagNameNS(W, 'p'):
+        children = [c for c in para.childNodes if c.nodeType == c.ELEMENT_NODE]
+        i = 0
+        while i < len(children):
+            run = children[i]
+            if run.localName != 'r' or not has_only_t(run):
+                i += 1
+                continue
+
+            rpr = get_rpr_xml(run)
+            merged_text = get_t_text(run)
+            j = i + 1
+
+            while j < len(children):
+                nxt = children[j]
+                if nxt.localName != 'r' or not has_only_t(nxt):
+                    break
+                if get_rpr_xml(nxt) != rpr:
+                    break
+                merged_text += get_t_text(nxt)
+                j += 1
+
+            if j > i + 1:
+                # Replace run's <w:t> with merged text
+                for child in list(run.childNodes):
+                    if child.nodeType == child.ELEMENT_NODE and child.localName == 't':
+                        run.removeChild(child)
+
+                new_t = dom.createElementNS(W, 'w:t')
+                if merged_text != merged_text.strip():
+                    new_t.setAttribute('xml:space', 'preserve')
+                new_t.appendChild(dom.createTextNode(merged_text))
+                run.appendChild(new_t)
+
+                # Remove the consumed runs
+                for k in range(i + 1, j):
+                    para.removeChild(children[k])
+
+                children = [c for c in para.childNodes if c.nodeType == c.ELEMENT_NODE]
+
+            i += 1
+
+    return dom.toxml(encoding='utf-8')
+
+
 def fill_template(prepared_by, date_str, incidents):
-    work_dir = tempfile.mkdtemp()
+    with open(TEMPLATE_PATH, 'rb') as f:
+        template_bytes = f.read()
+
+    files = {}
+    with zipfile.ZipFile(io.BytesIO(template_bytes), 'r') as zin:
+        for item in zin.infolist():
+            files[item.filename] = zin.read(item.filename)
+
+    # Fix Content_Types
+    files['[Content_Types].xml'] = files['[Content_Types].xml'].replace(
+        b'wordprocessingml.template.main+xml',
+        b'wordprocessingml.document.main+xml'
+    )
+
+    # Merge runs then fill
+    xml_bytes = merge_runs_xml(files['word/document.xml'])
+    xml = xml_bytes.decode('utf-8') if isinstance(xml_bytes, bytes) else xml_bytes
+
+    # Strip XML declaration if present (minidom adds it)
+    xml = re.sub(r'^<\?xml[^?]*\?>', '', xml).strip()
+
+    values = [prepared_by, date_str]
+    for inc in incidents:
+        values.extend([
+            inc['time'],
+            inc['location'],
+            inc['dr'],
+            inc['subject'],
+            inc['details'],
+        ])
+
+    placeholder_pattern = r'(fldCharType="separate"/>)<w:t[^>]*>[^<]*</w:t>'
+    idx = 0
+
+    def replacer(m):
+        nonlocal idx
+        if idx < len(values):
+            val = values[idx].replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            idx += 1
+            return f'{m.group(1)}<w:t xml:space="preserve">{val}</w:t>'
+        return m.group(0)
+
+    xml = re.sub(placeholder_pattern, replacer, xml)
+
+    # Remove unfilled tables
+    tbl_matches = list(re.finditer(r'<w:tbl[ >].*?</w:tbl>', xml, re.DOTALL))
+    empty_spans = [(t.start(), t.end()) for t in tbl_matches
+                   if '\u2002' in t.group(0)]
+    for start, end in reversed(empty_spans):
+        xml = xml[:start] + xml[end:]
+
+    files['word/document.xml'] = xml.encode('utf-8')
+
+    # Write to temp file
+    with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as tmp:
+        tmp_path = tmp.name
+
     try:
-        # 1. Copy template and unpack
-        template_copy = os.path.join(work_dir, "template.docx")
-        shutil.copy(TEMPLATE_PATH, template_copy)
-
-        unpack_dir = os.path.join(work_dir, "unpacked")
-        os.makedirs(unpack_dir)
-        with zipfile.ZipFile(template_copy, 'r') as z:
-            z.extractall(unpack_dir)
-
-        # 2. Merge runs
-        subprocess.run(
-            ['python3', MERGE_RUNS_SCRIPT, unpack_dir + '/'],
-            capture_output=True
-        )
-
-        # 3. Fix Content_Types
-        ct_path = os.path.join(unpack_dir, '[Content_Types].xml')
-        with open(ct_path, 'r') as f:
-            ct = f.read()
-        ct = ct.replace(
-            'wordprocessingml.template.main+xml',
-            'wordprocessingml.document.main+xml'
-        )
-        with open(ct_path, 'w') as f:
-            f.write(ct)
-
-        # 4. Fill placeholders
-        doc_path = os.path.join(unpack_dir, 'word', 'document.xml')
-        with open(doc_path, 'r', encoding='utf-8') as f:
-            xml = f.read()
-
-        # Count placeholders before filling
-        placeholder_count = len(re.findall(r'fldCharType="separate"/>(<w:t>[^<]*</w:t>)', xml))
-
-        values = [prepared_by, date_str]
-        for inc in incidents:
-            values.extend([
-                inc['time'],
-                inc['location'],
-                inc['dr'],
-                inc['subject'],
-                inc['details'],
-            ])
-
-        placeholder_pattern = r'(fldCharType="separate"/>)<w:t>[^<]*</w:t>'
-        idx = 0
-
-        def replacer(m):
-            nonlocal idx
-            if idx < len(values):
-                val = values[idx].replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                idx += 1
-                return f'{m.group(1)}<w:t xml:space="preserve">{val}</w:t>'
-            return m.group(0)
-
-        xml = re.sub(placeholder_pattern, replacer, xml)
-        fields_filled = idx
-
-        # 5. Remove unfilled incident tables
-        tbl_matches = list(re.finditer(r'<w:tbl[ >].*?</w:tbl>', xml, re.DOTALL))
-        empty_spans = [(t.start(), t.end()) for t in tbl_matches
-                       if '\u2002\u2002\u2002\u2002\u2002' in t.group(0)]
-        for start, end in reversed(empty_spans):
-            xml = xml[:start] + xml[end:]
-
-        with open(doc_path, 'w', encoding='utf-8') as f:
-            f.write(xml)
-
-        # 6. Repack
-        out_path = os.path.join(work_dir, "output.docx")
-        with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_DEFLATED) as zout:
-            for root, dirs, files in os.walk(unpack_dir):
-                for file in files:
-                    filepath = os.path.join(root, file)
-                    arcname = os.path.relpath(filepath, unpack_dir)
-                    zout.write(filepath, arcname)
-
-        with open(out_path, 'rb') as f:
-            return f.read(), fields_filled, placeholder_count
-
+        with zipfile.ZipFile(tmp_path, 'w', zipfile.ZIP_DEFLATED) as zout:
+            for fname, data in files.items():
+                zout.writestr(fname, data)
+        with open(tmp_path, 'rb') as f:
+            return f.read(), idx
     finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
+        os.unlink(tmp_path)
 
 
 @app.route('/supervisors', methods=['GET'])
@@ -173,46 +233,38 @@ def get_supervisors():
 
 @app.route('/debug', methods=['GET', 'POST'])
 def debug():
-    """Debug endpoint - returns info about what the server sees in the template."""
     body = request.get_json(silent=True) or {}
-    raw_text = body.get('text', 'DR#:\n26-000001\nTime:\n8:00 AM\nLocation:\nTest Location\nSubject:\nTest Subject\nDetails:\nTest details.')
 
-    incidents = parse_incidents(raw_text)
+    with open(TEMPLATE_PATH, 'rb') as f:
+        template_bytes = f.read()
 
-    work_dir = tempfile.mkdtemp()
-    try:
-        template_copy = os.path.join(work_dir, "template.docx")
-        shutil.copy(TEMPLATE_PATH, template_copy)
-        unpack_dir = os.path.join(work_dir, "unpacked")
-        os.makedirs(unpack_dir)
-        with zipfile.ZipFile(template_copy, 'r') as z:
-            z.extractall(unpack_dir)
+    files = {}
+    with zipfile.ZipFile(io.BytesIO(template_bytes), 'r') as zin:
+        for item in zin.infolist():
+            files[item.filename] = zin.read(item.filename)
 
-        merge_result = subprocess.run(
-            ['python3', MERGE_RUNS_SCRIPT, unpack_dir + '/'],
-            capture_output=True, text=True
-        )
+    # Before merge
+    xml_raw = files['word/document.xml'].decode('utf-8')
+    before_count = len(re.findall(r'fldCharType="separate"/>(<w:t[^>]*>[^<]*</w:t>)', xml_raw))
+    before_en = xml_raw.count('\u2002')
 
-        doc_path = os.path.join(unpack_dir, 'word', 'document.xml')
-        with open(doc_path, 'r') as f:
-            xml = f.read()
+    # After merge
+    xml_bytes = merge_runs_xml(files['word/document.xml'])
+    xml_merged = xml_bytes.decode('utf-8') if isinstance(xml_bytes, bytes) else xml_bytes
+    xml_merged = re.sub(r'^<\?xml[^?]*\?>', '', xml_merged).strip()
+    after_count = len(re.findall(r'fldCharType="separate"/>(<w:t[^>]*>[^<]*</w:t>)', xml_merged))
+    after_en = xml_merged.count('\u2002')
 
-        placeholders = re.findall(r'fldCharType="separate"/>(<w:t>[^<]*</w:t>)', xml)
-        en_spaces = xml.count('\u2002')
-        sample = xml[xml.find('fldCharType="separate"'):xml.find('fldCharType="separate"')+200] if 'fldCharType="separate"' in xml else 'NOT FOUND'
+    sample_before = xml_raw[xml_raw.find('fldCharType="separate"'):xml_raw.find('fldCharType="separate"')+200]
+    sample_after = xml_merged[xml_merged.find('fldCharType="separate"'):xml_merged.find('fldCharType="separate"')+200] if 'fldCharType="separate"' in xml_merged else 'NOT FOUND'
 
-        return jsonify({
-            "merge_runs_output": merge_result.stdout,
-            "merge_runs_script_exists": os.path.exists(MERGE_RUNS_SCRIPT),
-            "template_exists": os.path.exists(TEMPLATE_PATH),
-            "placeholder_count": len(placeholders),
-            "en_space_count": en_spaces,
-            "sample_context": sample,
-            "incidents_parsed": len(incidents),
-            "first_incident": incidents[0] if incidents else None,
-        })
-    finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
+    return jsonify({
+        "template_exists": True,
+        "before_merge": {"placeholder_count": before_count, "en_space_count": before_en},
+        "after_merge": {"placeholder_count": after_count, "en_space_count": after_en},
+        "sample_before": sample_before,
+        "sample_after": sample_after,
+    })
 
 
 @app.route('/generate', methods=['POST'])
@@ -239,14 +291,9 @@ def generate():
     filename = today.strftime("%m-%d-%Y") + ".docx"
 
     try:
-        docx_bytes, fields_filled, placeholder_count = fill_template(prepared_by, date_str, incidents)
+        docx_bytes, fields_filled = fill_template(prepared_by, date_str, incidents)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-    if fields_filled == 0:
-        return jsonify({
-            "error": f"Template placeholders not found. placeholder_count={placeholder_count}. Deploy may need merge_runs.py."
-        }), 500
 
     response = send_file(
         io.BytesIO(docx_bytes),
@@ -255,7 +302,6 @@ def generate():
         download_name=filename
     )
     response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
-    response.headers['X-Filename'] = filename
     return response
 
 
