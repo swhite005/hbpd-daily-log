@@ -408,9 +408,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }));
 
     Promise.all(readers).then(contents => {
-      textarea.value = contents.join('\n\n');
+      // Append to existing content rather than replacing
+      const existing = textarea.value.trim();
+      const newContent = contents.join('\n\n');
+      textarea.value = existing ? existing + '\n\n' + newContent : newContent;
       updateCharCount();
-      showStatus('success', `✅ ${validFiles.length} file(s) loaded.`);
+      showStatus('success', `✅ ${validFiles.length} file(s) added. Drop more or click Generate.`);
     });
   });
   dropZone.addEventListener('click', () => textarea.focus());
@@ -425,18 +428,31 @@ function parseEmlBody(emlContent) {
   }
 
   function stripFooter(text) {
-    // Stop at common email footer patterns
-    const cutoffs = [
+    // Find the position of the last DR# block and only strip after it ends
+    const lastDR = text.lastIndexOf('DR#:');
+    if (lastDR === -1) return text.trim();
+
+    // Find end of last incident — look for signature/footer patterns after the last DR# block
+    const afterLastDR = text.substring(lastDR);
+    const footerPatterns = [
+      /\n+John [A-Z]\w+\s*\n+Lieutenant/i,
       /\n+2000 Main Street/i,
-      /\n+Huntington Beach Police Department\s*\n+[^D]/i,
+      /\n+Office:\s*\(/i,
       /\n+https?:\/\/www\.(facebook|twitter|youtube)/i,
-      /\n+\[cid:/i,
     ];
-    for (const pattern of cutoffs) {
-      const m = text.search(pattern);
-      if (m > 100) text = text.substring(0, m);
+
+    let cutAt = text.length;
+    for (const pattern of footerPatterns) {
+      const m = afterLastDR.search(pattern);
+      if (m > 0) {
+        cutAt = Math.min(cutAt, lastDR + m);
+      }
     }
-    return text.trim();
+
+    // Also strip [cid:...] inline image references throughout
+    let result = text.substring(0, cutAt);
+    result = result.replace(/\[cid:[^\]]+\]/g, '').replace(/\n{3,}/g, '\n\n');
+    return result.trim();
   }
 
   // Try base64 text/plain first
