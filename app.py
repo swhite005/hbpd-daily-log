@@ -190,7 +190,8 @@ def fill_template(prepared_by, date_str, incidents):
             inc['details'],
         ])
 
-    placeholder_pattern = r'(fldCharType="separate"/>)<w:t[^>]*>[^<]*</w:t>'
+    # After merge, pattern is: fldCharType="separate"/></w:r> followed by a run with en-spaces
+    placeholder_pattern = r'(fldCharType="separate"/></w:r>)<w:r[^>]*>(?:<w:rPr>.*?</w:rPr>)?<w:t[^>]*>[\u2002]+</w:t></w:r>'
     idx = 0
 
     def replacer(m):
@@ -198,10 +199,10 @@ def fill_template(prepared_by, date_str, incidents):
         if idx < len(values):
             val = values[idx].replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
             idx += 1
-            return f'{m.group(1)}<w:t xml:space="preserve">{val}</w:t>'
+            return f'{m.group(1)}<w:r><w:rPr><w:rStyle w:val="Style1Char"/></w:rPr><w:t xml:space="preserve">{val}</w:t></w:r>'
         return m.group(0)
 
-    xml = re.sub(placeholder_pattern, replacer, xml)
+    xml = re.sub(placeholder_pattern, replacer, xml, flags=re.DOTALL)
 
     # Remove unfilled tables
     tbl_matches = list(re.finditer(r'<w:tbl[ >].*?</w:tbl>', xml, re.DOTALL))
@@ -245,14 +246,15 @@ def debug():
 
     # Before merge
     xml_raw = files['word/document.xml'].decode('utf-8')
-    before_count = len(re.findall(r'fldCharType="separate"/>(<w:t[^>]*>[^<]*</w:t>)', xml_raw))
+    ph = r'fldCharType="separate"/></w:r><w:r[^>]*>(?:<w:rPr>.*?</w:rPr>)?<w:t[^>]*>[\u2002]+</w:t></w:r>'
+    before_count = len(re.findall(ph, xml_raw, re.DOTALL))
     before_en = xml_raw.count('\u2002')
 
     # After merge
     xml_bytes = merge_runs_xml(files['word/document.xml'])
     xml_merged = xml_bytes.decode('utf-8') if isinstance(xml_bytes, bytes) else xml_bytes
     xml_merged = re.sub(r'^<\?xml[^?]*\?>', '', xml_merged).strip()
-    after_count = len(re.findall(r'fldCharType="separate"/>(<w:t[^>]*>[^<]*</w:t>)', xml_merged))
+    after_count = len(re.findall(ph, xml_merged, re.DOTALL))
     after_en = xml_merged.count('\u2002')
 
     sample_before = xml_raw[xml_raw.find('fldCharType="separate"'):xml_raw.find('fldCharType="separate"')+200]
