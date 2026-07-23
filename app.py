@@ -46,12 +46,15 @@ def parse_incidents(raw_text):
 
     # Normalize Windows-1252 / C1 control dash characters that Outlook
     # pastes instead of proper Unicode dashes — Python's split() treats
-    # these as whitespace and silently drops them
+    # these as whitespace and silently drops them. Also handle U+FFFD
+    # (replacement char) which Flask inserts when it sees invalid UTF-8
+    # bytes like raw 0x97 from Outlook clipboard.
     raw_text = (raw_text
         .replace('\x96', '\u2013')   # en-dash
         .replace('\x97', '\u2014')   # em-dash
         .replace('\u0096', '\u2013') # C1 en-dash
         .replace('\u0097', '\u2014') # C1 em-dash
+        .replace('\ufffd', '\u2014') # replacement char -> em-dash
     )
     # it with a DR# mentioned in that same paragraph block
     pre_dr_text = ''
@@ -363,9 +366,22 @@ def debug():
 
 @app.route('/generate', methods=['POST'])
 def generate():
-    body = request.get_json()
-    if not body:
-        return jsonify({"error": "No data provided"}), 400
+    # Use force=True and silent=True then manually decode raw bytes
+    # to handle Windows-1252 encoded chars (like em-dash 0x97) from Outlook
+    try:
+        body = request.get_json(force=True)
+    except Exception:
+        body = None
+
+    if body is None:
+        # Try decoding raw bytes as windows-1252 which maps 0x97 -> em-dash
+        try:
+            raw_bytes = request.get_data()
+            import json
+            decoded_str = raw_bytes.decode('windows-1252')
+            body = json.loads(decoded_str)
+        except Exception:
+            return jsonify({"error": "No data provided"}), 400
 
     prepared_by = body.get('preparedBy', 'Lieutenant Shawn White')
     raw_text = body.get('text', '')
