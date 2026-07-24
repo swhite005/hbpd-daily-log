@@ -56,7 +56,7 @@ def parse_incidents(raw_text):
         .replace('\u0097', '\u2014') # C1 em-dash
         .replace('\ufffd', '\u2014') # replacement char -> em-dash
     )
-    # it with a DR# mentioned in that same paragraph block
+    # Extract any update text that appears BEFORE the first DR#
     pre_dr_text = ''
     first_dr_pos = re.search(r'DR#\s*:', raw_text, re.IGNORECASE)
     if first_dr_pos and first_dr_pos.start() > 0:
@@ -94,12 +94,14 @@ def parse_incidents(raw_text):
             return '\n\n'.join(cleaned).strip()
 
         dr = extract('DR#', chunk)
+        dr = re.sub(r'[,;\s]+$', '', dr)  # strip trailing comma/semicolon from DR#
         time_val = extract('Time', chunk)
         location = extract('Location', chunk)
         subject = extract('Subject', chunk)
         details = extract_details(chunk)
 
-        if dr == "N/A" and time_val == "N/A":
+        # Skip only if there is truly no identifying information at all
+        if dr == "N/A" and time_val == "N/A" and subject == "N/A":
             continue
 
         location = thousand_block(location)
