@@ -4,6 +4,7 @@ import io
 import zipfile
 import tempfile
 import shutil
+import subprocess
 from datetime import datetime
 from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
@@ -244,84 +245,113 @@ def merge_runs_xml(xml_bytes):
 
 
 def fill_template(prepared_by, date_str, incidents):
-    with open(TEMPLATE_PATH, 'rb') as f:
-        template_bytes = f.read()
+    MERGE_RUNS_SCRIPT = os.path.join(os.path.dirname(__file__), "merge_runs.py")
 
-    files = {}
-    with zipfile.ZipFile(io.BytesIO(template_bytes), 'r') as zin:
-        for item in zin.infolist():
-            files[item.filename] = zin.read(item.filename)
-
-    # Fix Content_Types
-    files['[Content_Types].xml'] = files['[Content_Types].xml'].replace(
-        b'wordprocessingml.template.main+xml',
-        b'wordprocessingml.document.main+xml'
-    )
-
-    # Merge runs then fill
-    xml_bytes = merge_runs_xml(files['word/document.xml'])
-    xml = xml_bytes.decode('utf-8') if isinstance(xml_bytes, bytes) else xml_bytes
-
-    # Strip XML declaration if present (minidom adds it)
-    xml = re.sub(r'^<\?xml[^?]*\?>', '', xml).strip()
-
-    values = [prepared_by, date_str]
-    for inc in incidents:
-        values.extend([
-            inc['time'],
-            inc['location'],
-            inc['dr'],
-            inc['subject'],
-            inc['details'],
-        ])
-
-    # After merge, pattern is: fldCharType="separate"/></w:r> followed by a run with en-spaces
-    placeholder_pattern = r'(fldCharType="separate"/></w:r>)<w:r[^>]*>(?:<w:rPr>.*?</w:rPr>)?<w:t[^>]*>[\u2002]+</w:t></w:r>'
-    idx = 0
-
-    def make_run(text):
-        """Build a Word XML run, inserting a blank line between paragraphs."""
-        paragraphs = text.split('\n\n')
-        parts = []
-        for i, para in enumerate(paragraphs):
-            escaped = para.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-            parts.append(f'<w:t xml:space="preserve">{escaped}</w:t>')
-            if i < len(paragraphs) - 1:
-                # Two line breaks = one blank line between paragraphs
-                parts.append('<w:br/><w:br/>')
-        return f'<w:r><w:rPr><w:rStyle w:val="Style1Char"/></w:rPr>{"".join(parts)}</w:r>'
-
-    def replacer(m):
-        nonlocal idx
-        if idx < len(values):
-            val = values[idx]
-            idx += 1
-            return f'{m.group(1)}{make_run(val)}'
-        return m.group(0)
-
-    xml = re.sub(placeholder_pattern, replacer, xml, flags=re.DOTALL)
-
-    # Remove unfilled tables
-    tbl_matches = list(re.finditer(r'<w:tbl[ >].*?</w:tbl>', xml, re.DOTALL))
-    empty_spans = [(t.start(), t.end()) for t in tbl_matches
-                   if '\u2002' in t.group(0)]
-    for start, end in reversed(empty_spans):
-        xml = xml[:start] + xml[end:]
-
-    files['word/document.xml'] = xml.encode('utf-8')
-
-    # Write to temp file
-    with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as tmp:
-        tmp_path = tmp.name
-
+    work_dir = tempfile.mkdtemp()
     try:
-        with zipfile.ZipFile(tmp_path, 'w', zipfile.ZIP_DEFLATED) as zout:
-            for fname, data in files.items():
-                zout.writestr(fname, data)
-        with open(tmp_path, 'rb') as f:
+        # 1. Copy template and unpack to disk
+        template_copy = os.path.join(work_dir, "template.docx")
+        shutil.copy(TEMPLATE_PATH, template_copy)
+        unpack_dir = os.path.join(work_dir, "unpacked")
+        os.makedirs(unpack_dir)
+        with zipfile.ZipFile(template_copy, 'r') as z:
+            z.extractall(unpack_dir)
+
+        # 2. Run merge_runs.py to consolidate split XML runs
+        subprocess.run(
+            ['python3', MERGE_RUNS_SCRIPT, unpack_dir + '/'],
+            capture_output=True
+        )
+
+        # 3. Fix Content_Types
+        ct_path = os.path.join(unpack_dir, '[Content_Types].xml')
+        with open(ct_path, 'r') as f:
+            ct = f.read()
+        ct = ct.replace('wordprocessingml.template.main+xml', 'wordprocessingml.document.main+xml')
+        with open(ct_path, 'w') as f:
+            f.write(ct)
+
+        # 4. Read and fill document.xml
+        doc_path = os.path.join(unpack_dir, 'word', 'document.xml')
+        with open(doc_path, 'r', encoding='utf-8') as f:
+            xml = f.read()
+
+        values = [prepared_by, date_str]
+        for inc in incidents:
+            values.extend([
+                inc['time'],
+                inc['location'],
+                inc['dr'],
+                inc['subject'],
+                inc['details'],
+            ])
+
+        # Try both placeholder patterns — merged (post merge_runs) and unmerged
+        # Pattern A: after merge_runs.py — fldChar and w:t in same run
+        pattern_a = r'(fldCharType="separate"/>)<w:t>[^<]*</w:t>'
+        # Pattern B: fldChar run followed by separate en-space run (minidom merge)
+        pattern_b = r'(fldCharType="separate"/></w:r>)<w:r[^>]*>(?:<w:rPr>.*?</w:rPr>)?<w:t[^>]*>[\u2002]+</w:t></w:r>'
+
+        matches_a = len(re.findall(pattern_a, xml))
+        matches_b = len(re.findall(pattern_b, xml, re.DOTALL))
+
+        idx = 0
+
+        def make_run(text):
+            paragraphs = text.split('\n\n')
+            parts = []
+            for i, para in enumerate(paragraphs):
+                escaped = para.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                parts.append(f'<w:t xml:space="preserve">{escaped}</w:t>')
+                if i < len(paragraphs) - 1:
+                    parts.append('<w:br/><w:br/>')
+            return f'<w:r><w:rPr><w:rStyle w:val="Style1Char"/></w:rPr>{"".join(parts)}</w:r>'
+
+        if matches_a >= matches_b:
+            # Use pattern A — simple replacement
+            def replacer_a(m):
+                nonlocal idx
+                if idx < len(values):
+                    val = values[idx]
+                    val = val.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                    idx += 1
+                    return f'{m.group(1)}<w:t xml:space="preserve">{val}</w:t>'
+                return m.group(0)
+            xml = re.sub(pattern_a, replacer_a, xml)
+        else:
+            # Use pattern B
+            def replacer_b(m):
+                nonlocal idx
+                if idx < len(values):
+                    val = values[idx]
+                    idx += 1
+                    return f'{m.group(1)}{make_run(val)}'
+                return m.group(0)
+            xml = re.sub(pattern_b, replacer_b, xml, flags=re.DOTALL)
+
+        # 5. Remove unfilled incident tables
+        tbl_matches = list(re.finditer(r'<w:tbl[ >].*?</w:tbl>', xml, re.DOTALL))
+        empty_spans = [(t.start(), t.end()) for t in tbl_matches if '\u2002' in t.group(0)]
+        for start, end in reversed(empty_spans):
+            xml = xml[:start] + xml[end:]
+
+        with open(doc_path, 'w', encoding='utf-8') as f:
+            f.write(xml)
+
+        # 6. Repack
+        out_path = os.path.join(work_dir, "output.docx")
+        with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_DEFLATED) as zout:
+            for root, dirs, files_list in os.walk(unpack_dir):
+                for file in files_list:
+                    filepath = os.path.join(root, file)
+                    arcname = os.path.relpath(filepath, unpack_dir)
+                    zout.write(filepath, arcname)
+
+        with open(out_path, 'rb') as f:
             return f.read(), idx
+
     finally:
-        os.unlink(tmp_path)
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 @app.route('/supervisors', methods=['GET'])
