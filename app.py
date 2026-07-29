@@ -23,7 +23,7 @@ SUPERVISORS = [
 ]
 
 
-def thousand_block(address):
+def thousand_block(address, changelog=None):
     business_indicators = ["@", "(", "\u2013", "\u2014", "Hwy", "Park", "Beach", "Plaza",
                            "Channel", "Trail", "River", "Lake", "Pier", "Circle",
                            "School", "Market", "Store", "Hospital", "Library"]
@@ -39,23 +39,55 @@ def thousand_block(address):
     rest = m.group(2)
     rest = re.sub(r'\s*(#\S+|Apt\s+\S+|Unit\s+\S+)', '', rest, flags=re.IGNORECASE).strip()
     block = (num // 100) * 100
-    return f"{block} Block of {rest}"
+    converted = f"{block} Block of {rest}"
+    if changelog is not None and converted != address:
+        changelog.append(f"Address converted: \"{address}\" → \"{converted}\"")
+    return converted
+
+
+def time_sort_key(incident):
+    """
+    Convert time string to sortable minutes value.
+    Night-watch AM entries (after midnight) are pushed after all PM entries
+    by adding 24*60 to their value so they sort to the end.
+    """
+    time_str = incident.get('time', 'N/A')
+    is_night_am = incident.get('_night_am', False)
+
+    if not time_str or time_str in ('N/A', 'Daywatch', 'Day Watch'):
+        return 1  # sort to front
+
+    # Handle ranges like "6:00 PM – 12:00 AM" — use the start time
+    time_str = re.split(r'\s*[–\-]\s*', time_str)[0].strip()
+
+    m = re.search(r'(\d{1,2}):(\d{2})\s*(AM|PM)', time_str, re.IGNORECASE)
+    if not m:
+        return 9998
+
+    h, mn, period = int(m.group(1)), int(m.group(2)), m.group(3).upper()
+    if period == 'PM' and h != 12:
+        h += 12
+    elif period == 'AM' and h == 12:
+        h = 0
+
+    minutes = h * 60 + mn
+
+    # Night-watch AM entries come after all PM entries
+    if is_night_am:
+        minutes += 24 * 60
+
+    return minutes
 
 
 def parse_incidents(raw_text):
     incidents = []
+    changelog = []
 
-    # Normalize Windows-1252 / C1 control dash characters that Outlook
-    # pastes instead of proper Unicode dashes — Python's split() treats
-    # these as whitespace and silently drops them. Also handle U+FFFD
-    # (replacement char) which Flask inserts when it sees invalid UTF-8
-    # bytes like raw 0x97 from Outlook clipboard.
+    # Normalize Windows-1252 / C1 control dash characters
     raw_text = (raw_text
-        .replace('\x96', '\u2013')   # en-dash
-        .replace('\x97', '\u2014')   # em-dash
-        .replace('\u0096', '\u2013') # C1 en-dash
-        .replace('\u0097', '\u2014') # C1 em-dash
-        .replace('\ufffd', '\u2014') # replacement char -> em-dash
+        .replace('\x96', '\u2013').replace('\x97', '\u2014')
+        .replace('\u0096', '\u2013').replace('\u0097', '\u2014')
+        .replace('\ufffd', '\u2014')
     )
     # Extract any update text that appears BEFORE the first DR#
     pre_dr_text = ''
@@ -105,7 +137,9 @@ def parse_incidents(raw_text):
         if dr == "N/A" and time_val == "N/A" and subject == "N/A":
             continue
 
-        location = thousand_block(location)
+        original_location = location
+        location = thousand_block(location, changelog)
+        orig_details = details
         details = re.sub(r'image\d+\.\w+', '', details, flags=re.IGNORECASE).strip()
         details = re.sub(r'\[cid:[^\]]+\]', '', details).strip()
         details = re.sub(r'\n{3,}', '\n\n', details).strip()
@@ -118,6 +152,34 @@ def parse_incidents(raw_text):
             "details": details,
         })
 
+    # Determine the boundary between day watch and night watch portions
+    # by finding where PM entries switch to AM entries after a PM block.
+    # Tag AM entries that appear after PM entries as night-watch AM (after midnight).
+    seen_pm = False
+    for inc in incidents:
+        t = inc.get('time', '')
+        m = re.search(r'(\d{1,2}):(\d{2})\s*(AM|PM)', t, re.IGNORECASE)
+        if m:
+            period = m.group(3).upper()
+            h = int(m.group(1))
+            if period == 'PM':
+                seen_pm = True
+            elif period == 'AM' and seen_pm and h != 12:
+                # AM entry after a PM entry = night watch crossing midnight
+                inc['_night_am'] = True
+
+    # Sort all incidents by time, with night-watch AM entries at the end
+    original_order = [i['dr'] for i in incidents]
+    incidents.sort(key=time_sort_key)
+    sorted_order = [i['dr'] for i in incidents]
+
+    if original_order != sorted_order:
+        changelog.append("Entries reordered chronologically by time")
+
+    if any(i.get('_night_am') for i in incidents):
+        night_am_count = sum(1 for i in incidents if i.get('_night_am'))
+        changelog.append(f"{night_am_count} after-midnight entry(ies) sorted to end of log")
+
     # Deduplicate: if the same DR# appears more than once, merge the entries.
     # The first occurrence is kept as the base; subsequent occurrences append
     # updated details under an "Update:" heading rather than creating a duplicate.
@@ -129,28 +191,26 @@ def parse_incidents(raw_text):
         dr_key = re.sub(r'\s+', '', dr).upper()
 
         if dr_key in seen:
-            # This is an update to an existing entry — append only if new info
             existing = deduped[seen[dr_key]]
             update_details = inc['details']
             if update_details and update_details != "N/A":
                 if existing['details'] and existing['details'] != "N/A":
-                    # Only append if the update text is genuinely different
                     norm_existing = re.sub(r'\s+', ' ', existing['details']).strip()
                     norm_update = re.sub(r'\s+', ' ', update_details).strip()
                     if norm_update != norm_existing:
                         existing['details'] += '\n\nUpdate: ' + update_details
+                        changelog.append(f"DR# {inc[\'dr\']}: duplicate entry merged — update appended to original")
+                    else:
+                        changelog.append(f"DR# {inc[\'dr\']}: duplicate entry removed — identical to existing entry")
                 else:
                     existing['details'] = update_details
-            # Also update subject if the update has a more specific one
             if inc['subject'] != "N/A" and inc['subject'] != existing['subject']:
                 existing['subject'] = inc['subject']
         else:
             seen[dr_key] = len(deduped)
             deduped.append(inc)
 
-    # If there was pre-DR# update text, find which DR# it references and prepend
     if pre_dr_text:
-        # Look for a DR# mentioned in the update paragraph
         ref_dr = re.search(r'26-\d+', pre_dr_text)
         if ref_dr:
             ref_key = re.sub(r'\s+', '', ref_dr.group(0)).upper()
@@ -161,8 +221,13 @@ def parse_incidents(raw_text):
                     existing['details'] += '\n\nUpdate: ' + clean_pre
                 else:
                     existing['details'] = 'Update: ' + clean_pre
+                changelog.append(f"DR# {ref_dr.group(0)}: update note from email header appended to entry")
 
-    return deduped
+    # Remove internal sort tags before returning
+    for inc in deduped:
+        inc.pop('_night_am', None)
+
+    return deduped, changelog
 
 
 def merge_runs_xml(xml_bytes):
@@ -421,7 +486,7 @@ def generate():
     if not raw_text.strip():
         return jsonify({"error": "No incident text provided"}), 400
 
-    incidents = parse_incidents(raw_text)
+    incidents, changelog = parse_incidents(raw_text)
     if not incidents:
         return jsonify({"error": "No incidents could be parsed from the text"}), 400
 
@@ -444,8 +509,10 @@ def generate():
         download_name=filename
     )
     response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
-    response.headers['Access-Control-Expose-Headers'] = 'Content-Disposition, X-Filename'
+    response.headers['Access-Control-Expose-Headers'] = 'Content-Disposition, X-Filename, X-Changelog'
     response.headers['X-Filename'] = filename
+    import json as _json
+    response.headers['X-Changelog'] = _json.dumps(changelog)
     return response
 
 
