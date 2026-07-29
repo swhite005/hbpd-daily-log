@@ -199,9 +199,9 @@ def parse_incidents(raw_text):
                     norm_update = re.sub(r'\s+', ' ', update_details).strip()
                     if norm_update != norm_existing:
                         existing['details'] += '\n\nUpdate: ' + update_details
-                        changelog.append(f"DR# {inc[\'dr\']}: duplicate entry merged — update appended to original")
+                        changelog.append(f"DR# {inc['dr']}: duplicate entry merged — update appended to original")
                     else:
-                        changelog.append(f"DR# {inc[\'dr\']}: duplicate entry removed — identical to existing entry")
+                        changelog.append(f"DR# {inc['dr']}: duplicate entry removed — identical to existing entry")
                 else:
                     existing['details'] = update_details
             if inc['subject'] != "N/A" and inc['subject'] != existing['subject']:
