@@ -152,33 +152,57 @@ def parse_incidents(raw_text):
             "details": details,
         })
 
-    # Determine the boundary between day watch and night watch portions
-    # by finding where PM entries switch to AM entries after a PM block.
-    # Tag AM entries that appear after PM entries as night-watch AM (after midnight).
-    seen_pm = False
-    for inc in incidents:
+    # ── Sort all incidents chronologically ──────────────────────────────────
+    # Strategy: sort by time, treating AM entries that appear AFTER PM entries
+    # in the original list as "after midnight" — they sort after all PM entries.
+    # This correctly handles:
+    #   - Day watch AM entries (sort to front)
+    #   - Night watch PM entries (sort in middle)
+    #   - Night watch AM entries crossing midnight (sort to end)
+
+    def to_minutes(time_str):
+        if not time_str or time_str in ('N/A', 'Daywatch', 'Day Watch'):
+            return None
+        time_str = re.split(r'\s*[–\-]\s*', time_str)[0].strip()
+        m = re.search(r'(\d{1,2}):(\d{2})\s*(AM|PM)', time_str, re.IGNORECASE)
+        if not m:
+            return None
+        h, mn, period = int(m.group(1)), int(m.group(2)), m.group(3).upper()
+        if period == 'PM' and h != 12:
+            h += 12
+        elif period == 'AM' and h == 12:
+            h = 0
+        return h * 60 + mn
+
+    # Find the last PM time position to identify after-midnight AM entries
+    last_pm_idx = -1
+    for i, inc in enumerate(incidents):
         t = inc.get('time', '')
-        m = re.search(r'(\d{1,2}):(\d{2})\s*(AM|PM)', t, re.IGNORECASE)
-        if m:
-            period = m.group(3).upper()
-            h = int(m.group(1))
-            if period == 'PM':
-                seen_pm = True
-            elif period == 'AM' and seen_pm and h != 12:
-                # AM entry after a PM entry = night watch crossing midnight
+        if re.search(r'PM', t, re.IGNORECASE):
+            last_pm_idx = i
+
+    # Tag any AM entry that appears AFTER the last PM entry as after-midnight
+    for i, inc in enumerate(incidents):
+        if i > last_pm_idx:
+            t = inc.get('time', '')
+            m = re.search(r'(\d{1,2}):(\d{2})\s*AM', t, re.IGNORECASE)
+            if m:
+                h = int(m.group(1))
+                # h==12 means 12:xx AM = midnight itself — still after midnight
                 inc['_night_am'] = True
 
-    # Sort all incidents by time, with night-watch AM entries at the end
+    # Sort: normal minutes for all, +24h for after-midnight entries
     original_order = [i['dr'] for i in incidents]
-    incidents.sort(key=time_sort_key)
+    incidents.sort(key=lambda i: (
+        (to_minutes(i.get('time', '')) or 1) + (24 * 60 if i.get('_night_am') else 0)
+    ))
     sorted_order = [i['dr'] for i in incidents]
 
     if original_order != sorted_order:
         changelog.append("Entries reordered chronologically by time")
-
     if any(i.get('_night_am') for i in incidents):
-        night_am_count = sum(1 for i in incidents if i.get('_night_am'))
-        changelog.append(f"{night_am_count} after-midnight entry(ies) sorted to end of log")
+        n = sum(1 for i in incidents if i.get('_night_am'))
+        changelog.append(f"{n} after-midnight entry(ies) kept at end of log")
 
     # Deduplicate: if the same DR# appears more than once, merge the entries.
     # The first occurrence is kept as the base; subsequent occurrences append
