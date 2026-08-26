@@ -424,26 +424,28 @@ def fill_template(prepared_by, date_str, incidents):
         for start, end in reversed(empty_spans):
             xml = xml[:start] + xml[end:]
 
-        # 6. Remove trailing empty paragraphs after the last table
-        # These cause a blank final page when the document is shorter than expected
+        # 6. Remove trailing empty paragraphs after the last table to prevent blank final page
+        # BUT preserve the sectPr (section properties) which contains the header/footer references
         last_tbl = list(re.finditer(r'<w:tbl[ >].*?</w:tbl>', xml, re.DOTALL))
         if last_tbl:
             last_tbl_end = last_tbl[-1].end()
             body_close = xml.rfind('</w:body>')
             if body_close > last_tbl_end:
-                # Get content between last table and </w:body>
                 trailing = xml[last_tbl_end:body_close]
-                # Remove empty paragraphs (paragraphs with no text content)
-                trailing_cleaned = re.sub(
-                    r'<w:p[ >](?:(?!<w:t>).)*?</w:p>',
-                    '',
-                    trailing,
-                    flags=re.DOTALL
-                )
-                # Keep one minimal paragraph (Word requires at least one)
-                if not re.search(r'<w:p[ >]', trailing_cleaned):
-                    trailing_cleaned = '<w:p><w:pPr><w:jc w:val="left"/></w:pPr></w:p>'
-                xml = xml[:last_tbl_end] + trailing_cleaned + xml[body_close:]
+
+                # Extract sectPr — must be preserved (contains header/footer refs)
+                sect_match = re.search(r'<w:sectPr[ >].*?</w:sectPr>', trailing, re.DOTALL)
+                sect_xml = sect_match.group(0) if sect_match else ''
+
+                # Count empty paragraphs (no <w:t> content)
+                all_paras = list(re.finditer(r'<w:p[ >].*?</w:p>', trailing, re.DOTALL))
+                empty_paras = [p for p in all_paras if not re.search(r'<w:t[^>]*>[^<]+</w:t>', p.group(0))]
+
+                # Only strip if there are multiple empty paragraphs (keep 1 + sectPr)
+                if len(empty_paras) > 1:
+                    # Keep one minimal empty paragraph + the sectPr
+                    minimal_para = empty_paras[0].group(0)
+                    xml = xml[:last_tbl_end] + minimal_para + sect_xml + xml[body_close:]
 
         with open(doc_path, 'w', encoding='utf-8') as f:
             f.write(xml)
