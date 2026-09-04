@@ -89,8 +89,31 @@ def parse_incidents(raw_text):
         .replace('\u0096', '\u2013').replace('\u0097', '\u2014')
         .replace('\ufffd', '\u2014')
     )
-    # Extract any update text that appears BEFORE the first DR#
-    pre_dr_text = ''
+    # Strip email signatures/footers that may have been included in pasted text
+    # Look for common signature patterns and cut the text there
+    def strip_email_footer(text):
+        # Find the last DR# position
+        last_dr = max(text.rfind('DR#:'), text.rfind('DR#\n'))
+        if last_dr == -1:
+            return text
+        after = text[last_dr:]
+        cut = len(text)
+        footer_patterns = [
+            r'\n+2000 Main Street',
+            r'\n+Office:\s*\(',
+            r'\n+https?://www\.(facebook|twitter|youtube)',
+            r'\n+[A-Z][a-z]+ [A-Z][a-z]+\s*\n+(?:Lieutenant|Sergeant|Commander|Captain|Chief|Detective)',
+            r'\n+Southwest Area Commander',
+            r'\n+Patrol Division\s*\n+Office',
+        ]
+        for pat in footer_patterns:
+            m = re.search(pat, after, re.IGNORECASE)
+            if m and m.start() > 0:
+                cut = min(cut, last_dr + m.start())
+        result = re.sub(r'\[cid:[^\]]+\]', '', text[:cut])
+        return re.sub(r'\n{3,}', '\n\n', result).strip()
+
+    raw_text = strip_email_footer(raw_text)
     first_dr_pos = re.search(r'DR#\s*:', raw_text, re.IGNORECASE)
     if first_dr_pos and first_dr_pos.start() > 0:
         pre_dr_text = raw_text[:first_dr_pos.start()].strip()
