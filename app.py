@@ -556,7 +556,12 @@ def generate():
     if not raw_text.strip():
         return jsonify({"error": "No incident text provided"}), 400
 
-    incidents, changelog = parse_incidents(raw_text)
+    try:
+        incidents, changelog = parse_incidents(raw_text)
+    except Exception as e:
+        import traceback
+        return jsonify({"error": f"Parse error: {str(e)} | {traceback.format_exc()}"}), 500
+
     if not incidents:
         return jsonify({"error": "No incidents could be parsed from the text"}), 400
 
@@ -570,7 +575,9 @@ def generate():
     try:
         docx_bytes, fields_filled = fill_template(prepared_by, date_str, incidents)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        import traceback
+        tb = traceback.format_exc()
+        return jsonify({"error": f"{str(e)} | TRACEBACK: {tb}"}), 500
 
     response = send_file(
         io.BytesIO(docx_bytes),
