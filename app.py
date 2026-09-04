@@ -24,14 +24,34 @@ SUPERVISORS = [
 
 
 def thousand_block(address, changelog=None):
-    business_indicators = ["@", "(", "\u2013", "\u2014", "Hwy", "Park", "Beach", "Plaza",
-                           "Channel", "Trail", "River", "Lake", "Pier", "Circle",
-                           "School", "Market", "Store", "Hospital", "Library"]
-    for indicator in business_indicators:
-        if indicator in address:
-            return address
+    # Skip if clearly an intersection or no street number
     if re.search(r'\s[/&]\s', address):
         return address
+    if not re.match(r'^\d', address.strip()):
+        return address
+
+    # Skip if contains @ (e.g. "18582 Beach Blvd @ Venue" — has a business landmark)
+    if '@' in address:
+        return address
+
+    # Skip if contains parentheses (usually a business name or note)
+    if '(' in address:
+        return address
+
+    # Skip if contains em/en dash (usually a range or named location)
+    if '\u2013' in address or '\u2014' in address:
+        return address
+
+    # Business name indicators — only skip if these appear as whole words
+    # NOT as part of a street suffix (e.g. "Beach Blvd" is a street, "Beach Club" is a business)
+    business_words = ["Plaza", "Center", "Centre", "Mall", "Market", "Store",
+                      "Hospital", "School", "Library", "Club", "Hotel", "Motel",
+                      "Restaurant", "Cafe", "Inn", "Suites", "Station"]
+    addr_upper = address.upper()
+    for word in business_words:
+        if re.search(rf'\b{word}\b', address, re.IGNORECASE):
+            return address
+
     m = re.match(r'^(\d+)(.*)', address.strip())
     if not m:
         return address
