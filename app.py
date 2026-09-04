@@ -114,7 +114,7 @@ def parse_incidents(raw_text):
         return re.sub(r'\n{3,}', '\n\n', result).strip()
 
     raw_text = strip_email_footer(raw_text)
-    first_dr_pos = re.search(r'DR#\s*:', raw_text, re.IGNORECASE)
+    first_dr_pos = re.search(r'DR#\s*[:]?\s*\n', raw_text, re.IGNORECASE)
     if first_dr_pos and first_dr_pos.start() > 0:
         pre_dr_text = raw_text[:first_dr_pos.start()].strip()
 
