@@ -102,7 +102,7 @@ def parse_incidents(raw_text):
             continue
 
         def extract(label, text):
-            pattern = rf'{label}\s*[:]\s*(.*?)(?=\n\s*(?:Time|Location|Subject|Details|Officers|Arrested|DR#)\s*[:]|\Z)'
+            pattern = rf'{label}\s*[:]?\s*\r?\n(.*?)(?=\n\s*(?:Time|Location|Subject|Details|Officers|Arrested|DR#)\s*[:]?\s*\r?\n|\Z)'
             m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
             if m:
                 return ' '.join(m.group(1).split()).strip()
