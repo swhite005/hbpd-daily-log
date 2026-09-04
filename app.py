@@ -95,7 +95,7 @@ def parse_incidents(raw_text):
     if first_dr_pos and first_dr_pos.start() > 0:
         pre_dr_text = raw_text[:first_dr_pos.start()].strip()
 
-    chunks = re.split(r'(?=DR#\s*[:])', raw_text, flags=re.IGNORECASE)
+    chunks = re.split(r'(?=DR#\s*[:]?\s*\r?\n)', raw_text, flags=re.IGNORECASE)
     for chunk in chunks:
         chunk = chunk.strip()
         if not chunk:
@@ -109,7 +109,7 @@ def parse_incidents(raw_text):
             return "N/A"
 
         def extract_details(text):
-            pattern = r'Details\s*[:]\s*(.*?)(?=\n\s*(?:Officers|Arrested|DR#)\s*[:]|\Z)'
+            pattern = r'Details\s*[:]?\s*\r?\n(.*?)(?=\n\s*(?:Officers|Arrested|DR#)\s*[:]?\s*\r?\n|\Z)'
             m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
             if not m:
                 return "N/A"
